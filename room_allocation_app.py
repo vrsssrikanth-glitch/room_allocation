@@ -1,11 +1,9 @@
 import io
 import os
-import re
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 from supabase import Client, create_client
 
@@ -24,14 +22,6 @@ st.markdown(
     """
     <style>
     .main { background-color: #f8f9fa; }
-    .metric-card {
-        background: linear-gradient(135deg, #ffffff 0%, #f1f3f5 100%);
-        border: 1px solid #e9ecef;
-        border-radius: 10px;
-        padding: 12px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
-        text-align: center;
-    }
     .coordinator-badge {
         background-color: #e7f5ff;
         border-left: 4px solid #1c7ed6;
@@ -40,24 +30,15 @@ st.markdown(
         margin-bottom: 15px;
         font-size: 0.95rem;
     }
-    .tt-cell {
-        padding: 8px;
-        border-radius: 6px;
-        color: #1a1a1a;
-        font-size: 0.85rem;
-        line-height: 1.3;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-        min-height: 75px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+    .tt-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 6px;
     }
-    .tt-subject { font-weight: 700; margin-bottom: 3px; }
+    .tt-subject { font-weight: 700; margin-bottom: 3px; font-size: 0.85rem; }
     .tt-faculty { font-size: 0.78rem; opacity: 0.85; }
     .tt-room { font-size: 0.75rem; font-weight: 600; margin-top: 3px; }
-    .tag-lab { background-color: #fff3bf; color: #f59f00; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-    .tag-change { background-color: #ffe3e3; color: #e03131; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-    .tag-ok { background-color: #d3f9d8; color: #2b8a3e; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+    .tag-lab { background-color: #fff3bf; color: #f59f00; padding: 2px 5px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -301,7 +282,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # Fixed labs allocation
     for _, row in ordered.iterrows():
         if not is_lab(row["Subject"], lab_map):
             continue
@@ -323,7 +303,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # Theory allocation
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -423,12 +402,12 @@ def faculty_display_info(value: str, faculty_map: Dict[str, Dict[str, str]]) -> 
 
 
 def render_html_grid(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, Dict[str, str]]) -> str:
-    """Renders a styled HTML grid for class timetables with colored subject cards."""
+    """Renders a styled HTML grid cleanly without exposing raw tags."""
     g = result[result["Class"] == class_name].copy()
-    html = ["<table style='width:100%; border-collapse: separate; border-spacing: 6px;'>"]
+    html = ["<table class='tt-table'>"]
     html.append("<thead><tr style='background-color:#e9ecef; text-align:center;'><th>Day</th>")
     for p in PERIODS:
-        html.append(f"<th style='padding:8px;'>Period {p}</th>")
+        html.append(f"<th style='padding:8px;'>P{p}</th>")
     html.append("</tr></thead><tbody>")
 
     for day in DAYS:
@@ -557,7 +536,7 @@ with st.sidebar:
         fetch_table.clear()
         st.rerun()
     st.markdown("---")
-    st.markdown("### 📋 Rules Summary")
+    st.markdown("### 📋 Allocation Rules")
     st.write("• Shifts allowed only at P1, P3, P5")
     st.write("• Consistent theory room per shift block")
     st.write("• Fixed mappings enforced for Labs")
@@ -591,9 +570,7 @@ except Exception as exc:
     st.error(f"Allocation calculation failed: {exc}")
     st.stop()
 
-# ==========================================================
-# SUMMARY METRICS & CHARTS
-# ==========================================================
+# Metrics
 overall = overall_occupancy(proposed, rooms)
 cols = st.columns(7)
 cols[0].metric("Total Periods", metrics["Timetable periods"])
@@ -609,11 +586,10 @@ if failures is not None and not failures.empty:
         st.dataframe(failures, use_container_width=True, hide_index=True)
 
 st.markdown("---")
-
 classes = sorted(timetable["Class"].unique().tolist())
 
 # ==========================================================
-# 1. STANDARD CLASS TIMETABLE (INTERACTIVE VIEW)
+# 1. STANDARD CLASS TIMETABLE
 # ==========================================================
 st.header("1. Interactive Class Timetable")
 selected_class = st.selectbox("Select Class/Section", classes, key="main_class_select")
@@ -642,29 +618,12 @@ vacancy = vacancy_grid(proposed, rooms)
 st.dataframe(vacancy, use_container_width=True, hide_index=True)
 
 # ==========================================================
-# 4. ROOM OCCUPANCY % & VISUALIZATIONS
+# 4. ROOM OCCUPANCY %
 # ==========================================================
 st.markdown("---")
-st.header("4. Room Utilization & Analytics")
+st.header("4. Room Utilization & Occupancy %")
 occupancy = room_occupancy_summary(proposed, rooms)
-
-col_left, col_right = st.columns([1, 1])
-with col_left:
-    st.subheader("Occupancy by Room")
-    st.dataframe(occupancy, use_container_width=True, hide_index=True)
-
-with col_right:
-    st.subheader("Top Utilized Rooms")
-    fig = px.bar(
-        occupancy.head(10),
-        x="Room",
-        y="Occupancy %",
-        color="Type",
-        title="Top 10 Most Utilized Rooms",
-        text="Occupancy %",
-    )
-    fig.update_layout(xaxis_title="Room", yaxis_title="Occupancy (%)", height=400)
-    st.plotly_chart(fig, use_container_width=True)
+st.dataframe(occupancy, use_container_width=True, hide_index=True)
 
 # ==========================================================
 # 5. DAILY UTILIZATION
@@ -672,19 +631,10 @@ with col_right:
 st.markdown("---")
 st.header("5. Daily Room Utilization Breakdown")
 daily = room_daily_summary(proposed, rooms)
-
-fig_daily = px.line(
-    daily,
-    x="Period",
-    y="Slot occupancy %",
-    color="Day",
-    markers=True,
-    title="Room Occupancy Rate Across Periods (Daily)",
-)
-st.plotly_chart(fig_daily, use_container_width=True)
+st.dataframe(daily, use_container_width=True, hide_index=True)
 
 # ==========================================================
-# 6. ALL CLASS TIMETABLES & COORDINATOR DETAILS
+# 6. ALL CLASS TIMETABLES & CLASS COORDINATORS
 # ==========================================================
 st.markdown("---")
 st.header("6. All Class Timetables & Class Coordinators")
@@ -693,28 +643,25 @@ st.caption("Expand any section below to review schedule details and coordinator 
 search_query = st.text_input("🔍 Search Class or Coordinator Name", "")
 
 for cls in classes:
-    # Class Coordinator Info Lookup
     coord_info = coordinator_map.get(cls, {"name": "Not Assigned", "mobile": "N/A"})
     
-    # Filter search
     if search_query:
         match_class = search_query.lower() in cls.lower()
         match_coord = search_query.lower() in coord_info["name"].lower()
         if not (match_class or match_coord):
             continue
 
-    with st.expander(f"📘 Class: {cls}  |  Coordinator: {coord_info['name']} (📱 {coord_info['mobile']})"):
+    with st.expander(f"📘 Class: {cls} | Coordinator: {coord_info['name']} (📱 {coord_info['mobile']})"):
         st.markdown(
             f"""
             <div class="coordinator-badge">
-                <b>👤 Class Coordinator:</b> {coord_info['name']} &nbsp;|&nbsp; 
-                <b>📱 Contact:</b> {coord_info['mobile']}
+                <b>👤 Class Coordinator Name:</b> {coord_info['name']} &nbsp;|&nbsp; 
+                <b>📱 Mobile Number:</b> {coord_info['mobile']}
             </div>
             """,
             unsafe_allow_html=True,
         )
         
-        # Render color-coded HTML timetable grid for the class
         cls_html = render_html_grid(proposed, cls, faculty_map)
         st.markdown(cls_html, unsafe_allow_html=True)
 
@@ -743,4 +690,4 @@ with d_col2:
         use_container_width=True,
     )
 
-st.info("ℹ️ **READ-ONLY APP**: This application performs read operations only on Supabase tables and does not write or modify records.")
+st.info("ℹ️ **READ-ONLY APP**: This application performs read operations only on Supabase tables.")
