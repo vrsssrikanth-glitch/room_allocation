@@ -336,19 +336,3 @@ st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **
 # Colored Font Timetable Grid
 render_native_grid(proposed, selected_class, faculty_map)
 
-# ----------------------------------------------------------
-# 2. ALL CLASS TIMETABLES
-# ----------------------------------------------------------
-st.markdown("---")
-st.header("2. All Class Timetables & Coordinators")
-
-search_query = st.text_input("🔍 Search Class or Coordinator Name", "")
-
-for cls in classes:
-    c_info = coordinator_map.get(cls, {"name": "Not Assigned", "mobile": "N/A"})
-    if search_query:
-        if search_query.lower() not in cls.lower() and search_query.lower() not in c_info["name"].lower():
-            continue
-
-    with st.expander(f"📘 Class: {cls} | Coordinator: {c_info['name']} (📱 {c_info['mobile']})"):
-        render_native_grid(proposed, cls, faculty_map)
