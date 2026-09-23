@@ -1,6 +1,5 @@
 import io
 import os
-import zlib
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
@@ -9,11 +8,16 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==========================================================
-# STREAMLIT PAGE CONFIG
+# SEPARATE READ-ONLY ROOM ALLOCATION APPLICATION
 # ==========================================================
+# IMPORTANT:
+# - This program is independent of tt_supabase.py.
+# - It reads timetable/rooms/labs directly from Supabase.
+# - It NEVER inserts, updates, deletes, or syncs any data.
+# - Automatic room allocation exists only in memory in this app.
 
 st.set_page_config(
-    page_title="Timetable & Room Allocation System",
+    page_title="Automatic Room Allocation – Timetable",
     page_icon="🏫",
     layout="wide",
 )
@@ -21,27 +25,18 @@ st.set_page_config(
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 PERIODS = [1, 2, 3, 4, 5, 6, 7]
 SHIFT_BLOCKS = {
-    1: "P1-P2", 2: "P1-P2",
-    3: "P3-P4", 4: "P3-P4",
-    5: "P5-P7", 6: "P5-P7", 7: "P5-P7",
+    1: "P1-P2",
+    2: "P1-P2",
+    3: "P3-P4",
+    4: "P3-P4",
+    5: "P5-P7",
+    6: "P5-P7",
+    7: "P5-P7",
 }
+
 TABLE_TIMETABLE = "timetable"
 TABLE_ROOMS = "rooms"
 TABLE_LABS = "labs"
-TABLE_FACULTY = "faculty"
-
-CLASS_ROOM_MAP = {
-    "ECE": ["A41", "A42", "A45"],
-    "CSE": ["B44", "B46", "B47"],
-    "CSM": ["A46", "A47"],
-    "CAI": ["B43", "B35", "B36", "B34", "A48", "A38"],
-    "IT":  ["B43", "B35", "B36", "B34", "A48", "A38"],
-    "CSC": ["B43", "B35", "B36", "B34", "A48", "A38"],
-    "CSD": ["B43", "B35", "B36", "B34", "A48", "A38"],
-    "EEE": ["B43", "B35", "B36", "B34", "A48", "A38"],
-}
-
-SPECIAL_ACTIVITY_ROOMS = ["B41", "B42"]
 
 
 def clean(value: Any) -> str:
@@ -55,6 +50,7 @@ def norm(value: Any) -> str:
 
 
 def env_value(name: str) -> str:
+    # Supports both Streamlit Cloud secrets and local environment variables.
     try:
         value = str(st.secrets.get(name, "")).strip()
         if value:
@@ -69,7 +65,9 @@ def get_supabase() -> Client:
     url = env_value("SUPABASE_URL")
     key = env_value("SUPABASE_KEY")
     if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables are required.")
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_KEY environment variables are required."
+        )
     return create_client(url, key)
 
 
@@ -79,6 +77,7 @@ def fetch_table(table_name: str) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     start = 0
     page_size = 1000
+
     while True:
         response = (
             supabase.table(table_name)
@@ -91,6 +90,7 @@ def fetch_table(table_name: str) -> pd.DataFrame:
         if len(batch) < page_size:
             break
         start += page_size
+
     return pd.DataFrame(rows)
 
 
@@ -104,32 +104,48 @@ def find_col(df: pd.DataFrame, *names: str) -> str | None:
     return None
 
 
+def load_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    timetable = fetch_table(TABLE_TIMETABLE)
+    rooms = fetch_table(TABLE_ROOMS)
+    labs = fetch_table(TABLE_LABS)
+    return timetable, rooms, labs
+
+
 def normalize_timetable(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Class", "Subject", "Faculty", "Day", "Period", "Room"])
 
     class_col = find_col(df, "class_id", "class")
     subject_col = find_col(df, "subject_id", "subject")
-    faculty_col = find_col(df, "faculty_id", "faculty", "faculty_name")
+    faculty_col = find_col(df, "faculty_id", "faculty")
     day_col = find_col(df, "day")
     period_col = find_col(df, "period")
     room_col = find_col(df, "room", "room_id")
 
     missing = []
-    for label, col in [("class_id", class_col), ("subject", subject_col), ("day", day_col), ("period", period_col)]:
+    for label, col in [
+        ("class_id", class_col),
+        ("subject", subject_col),
+        ("day", day_col),
+        ("period", period_col),
+    ]:
         if col is None:
             missing.append(label)
     if missing:
-        raise ValueError("timetable table is missing required columns: " + ", ".join(missing))
+        raise ValueError(
+            "timetable table is missing required columns: " + ", ".join(missing)
+        )
 
-    out = pd.DataFrame({
-        "Class": df[class_col].map(clean),
-        "Subject": df[subject_col].map(clean),
-        "Faculty": df[faculty_col].map(clean) if faculty_col else "",
-        "Day": df[day_col].map(clean).str.title(),
-        "Period": pd.to_numeric(df[period_col], errors="coerce"),
-        "Room": df[room_col].map(clean) if room_col else "",
-    })
+    out = pd.DataFrame(
+        {
+            "Class": df[class_col].map(clean),
+            "Subject": df[subject_col].map(clean),
+            "Faculty": df[faculty_col].map(clean) if faculty_col else "",
+            "Day": df[day_col].map(clean).str.title(),
+            "Period": pd.to_numeric(df[period_col], errors="coerce"),
+            "Room": df[room_col].map(clean) if room_col else "",
+        }
+    )
     out["Period"] = out["Period"].astype("Int64")
     out = out.dropna(subset=["Period"])
     out = out[out["Day"].isin(DAYS) & out["Period"].isin(PERIODS)]
@@ -140,69 +156,43 @@ def normalize_timetable(df: pd.DataFrame) -> pd.DataFrame:
 def normalize_rooms(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         raise ValueError("rooms table is empty.")
+
     room_col = find_col(df, "room_id", "room", "room_no", "room_number")
     type_col = find_col(df, "type", "room_type", "category")
     if room_col is None:
-        raise ValueError("rooms table must contain Room_ID.")
-    out = pd.DataFrame({
-        "Room_ID": df[room_col].map(clean),
-        "Type": df[type_col].map(clean) if type_col else "Theory",
-    })
+        raise ValueError(
+            "rooms table must contain Room_ID (or Room / Room_No / Room_Number)."
+        )
+
+    out = pd.DataFrame(
+        {
+            "Room_ID": df[room_col].map(clean),
+            "Type": df[type_col].map(clean) if type_col else "",
+        }
+    )
     out = out[out["Room_ID"] != ""].copy()
     out["_key"] = out["Room_ID"].map(norm)
-    return out.drop_duplicates("_key", keep="first").drop(columns=["_key"]).reset_index(drop=True)
+    out = out.drop_duplicates("_key", keep="first").drop(columns=["_key"])
+    return out.reset_index(drop=True)
 
 
 def normalize_labs(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Lab_Subject", "Room"])
+
     subject_col = find_col(df, "lab_subject", "subject", "lab")
     room_col = find_col(df, "room", "room_id", "room_no", "room_number")
     if subject_col is None or room_col is None:
         return pd.DataFrame(columns=["Lab_Subject", "Room"])
-    out = pd.DataFrame({"Lab_Subject": df[subject_col].map(clean), "Room": df[room_col].map(clean)})
+
+    out = pd.DataFrame(
+        {
+            "Lab_Subject": df[subject_col].map(clean),
+            "Room": df[room_col].map(clean),
+        }
+    )
     out = out[(out["Lab_Subject"] != "") & (out["Room"] != "")]
     return out.reset_index(drop=True)
-
-
-def normalize_faculty(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["Faculty_ID", "Faculty_Name", "Mobile", "Is_Coordinator", "Class_Coordinated"])
-    id_col = find_col(df, "faculty_id", "id")
-    name_col = find_col(df, "name", "faculty_name")
-    mobile_col = find_col(df, "mobile", "phone", "contact")
-    coord_col = find_col(df, "is_coordinator", "coordinator")
-    class_coord_col = find_col(df, "class_coordinated", "class_coordinator")
-
-    out = pd.DataFrame({
-        "Faculty_ID": df[id_col].map(clean) if id_col else df[name_col].map(clean),
-        "Faculty_Name": df[name_col].map(clean) if name_col else "",
-        "Mobile": df[mobile_col].map(clean) if mobile_col else "",
-        "Is_Coordinator": df[coord_col].map(clean) if coord_col else "",
-        "Class_Coordinated": df[class_coord_col].map(clean) if class_coord_col else "",
-    })
-    return out[out["Faculty_Name"] != ""].reset_index(drop=True)
-
-
-def build_faculty_map(faculty: pd.DataFrame) -> Dict[str, str]:
-    return {norm(r["Faculty_ID"]): clean(r["Faculty_Name"]) for _, r in faculty.iterrows()}
-
-
-def build_coordinator_map(faculty: pd.DataFrame) -> Dict[str, Dict[str, str]]:
-    coord_map = {}
-    for _, r in faculty.iterrows():
-        is_coord = norm(r["Is_Coordinator"])
-        class_coord = clean(r["Class_Coordinated"])
-        if is_coord in ["YES", "TRUE", "1"] and class_coord:
-            coord_map[norm(class_coord)] = {
-                "name": clean(r["Faculty_Name"]),
-                "mobile": clean(r["Mobile"]),
-            }
-    return coord_map
-
-
-def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
-    return {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
 
 
 def is_lab(subject: str, lab_map: Dict[str, str]) -> bool:
@@ -210,294 +200,531 @@ def is_lab(subject: str, lab_map: Dict[str, str]) -> bool:
     return s in lab_map or "LAB" in s
 
 
-def is_special_activity(subject: str) -> bool:
-    s = norm(subject)
-    keywords = ["MAKER", "MAKERS", "LIB", "LIBRARY", "NEWS", "WEEKLY TEST", "TEST"]
-    return any(kw in s for kw in keywords)
+def room_is_lab_type(room_type: str) -> bool:
+    t = norm(room_type)
+    return any(k in t for k in ["LAB", "LABORATORY", "COMPUTER", "WORKSHOP"])
+
+
+def room_is_theory_type(room_type: str) -> bool:
+    t = norm(room_type)
+    return "THEORY" in t or t in {"CLASSROOM", "LECTURE", "LECTURE HALL"}
+
+
+def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
+    return {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
 
 
 def shift_block(period: int) -> str:
     return SHIFT_BLOCKS[int(period)]
 
 
-def get_preferred_rooms(cls_name: str) -> List[str]:
-    c_upper = norm(cls_name)
-    for prefix, allowed in CLASS_ROOM_MAP.items():
-        if prefix in c_upper:
-            return allowed
-    return []
+def slot_key(day: str, period: int) -> Tuple[str, int]:
+    return day, int(period)
 
 
-def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFrame):
+def allocate_rooms(
+    timetable: pd.DataFrame,
+    rooms: pd.DataFrame,
+    labs: pd.DataFrame,
+) -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
+    """Greedy, deterministic, read-only optimizer.
+
+    Rules implemented:
+      - Laboratory subjects use the fixed room from labs table.
+      - Theory room changes can happen only at P1, P3, and P5.
+      - A theory class uses one room throughout a shift block:
+        P1-P2, P3-P4, or P5-P7.
+      - Any room in the rooms table is a candidate.
+      - Lab/computer/workshop rooms may be used by theory when not occupied by a lab,
+        allowing before/after-lab use.
+      - Existing room is preserved when possible.
+      - Previous block room is strongly preferred to reduce movement.
+      - No database writes are performed.
+    """
     if timetable.empty:
-        return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame(), {}
+        return timetable.copy(), {"total": 0}, pd.DataFrame()
 
     lab_map = build_lab_map(labs)
-    all_supabase_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
-    theory_rooms = [
-        clean(r["Room_ID"]) for _, r in rooms.iterrows() 
-        if clean(r["Room_ID"]) and norm(r["Type"]) in ["THEORY", "CLASSROOM", "LECTURE", ""]
-    ]
-    if not theory_rooms:
-        theory_rooms = all_supabase_rooms[:]
 
+    room_records = rooms.to_dict("records")
+    all_rooms = [clean(r["Room_ID"]) for r in room_records if clean(r["Room_ID"])]
+    room_type = {norm(r["Room_ID"]): clean(r["Type"]) for r in room_records}
+
+    theory_rooms = [r for r in all_rooms if room_is_theory_type(room_type.get(norm(r), ""))]
+    other_rooms = [r for r in all_rooms if r not in theory_rooms]
+    if not theory_rooms:
+        theory_rooms = all_rooms[:]
+
+    # Occupancy of proposed allocation: (day, period) -> set(room)
     occupancy: Dict[Tuple[str, int], set] = defaultdict(set)
     proposed: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
 
-    day_order = {d: i for i, d in enumerate(DAYS)}
-    ordered = timetable.copy()
-    ordered["_d"] = ordered["Day"].map(day_order)
-    ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
+    ordered = timetable.sort_values(
+        by=["Day", "Period", "Class", "Subject"],
+        key=lambda s: s.map(DAYS.index) if s.name == "Day" else s,
+    ).copy()
 
-    # 1. Special Activity Allocation (EEE-2 Weekly Test in B41 only)
-    special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
-    for _, row in special_df.iterrows():
-        key = (row["Day"], int(row["Period"]))
-        cls_norm = norm(row["Class"])
-        subj_norm = norm(row["Subject"])
-        assigned_room = None
+    # Allocate fixed laboratories first.
+    for _, row in ordered.iterrows():
+        if not is_lab(row["Subject"], lab_map):
+            continue
 
-        if ("EEE-2" in cls_norm or "EEE 2" in cls_norm) and "WEEKLY TEST" in subj_norm:
-            if "B41" not in {norm(x) for x in occupancy[key]}:
-                assigned_room = "B41"
-
-        if not assigned_room:
-            for rm in SPECIAL_ACTIVITY_ROOMS:
-                if norm(rm) not in {norm(x) for x in occupancy[key]}:
-                    assigned_room = rm
-                    break
-        
-        if assigned_room:
-            occupancy[key].add(assigned_room)
-            proposed.append({
-                "Day": row["Day"], "Period": int(row["Period"]), "Class": row["Class"], "Subject": row["Subject"],
-                "Faculty": row["Faculty"], "Old Room": row["Room"], "Proposed Room": assigned_room,
-                "Allocation": "SPECIAL-ACTIVITY", "Shift Block": "SPECIAL", "Status": "ALLOCATED", "Reason": "",
-            })
-        else:
-            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "Special room occupied"})
-
-    # 2. Fixed Lab Allocation
-    labs_df = ordered[ordered["Subject"].map(lambda x: is_lab(x, lab_map) and not is_special_activity(x))].copy()
-    for _, row in labs_df.iterrows():
         mapped = lab_map.get(norm(row["Subject"]))
         if not mapped:
-            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "Lab missing in labs table"})
+            failures.append(
+                {
+                    "Day": row["Day"],
+                    "Period": row["Period"],
+                    "Class": row["Class"],
+                    "Subject": row["Subject"],
+                    "Reason": "Lab subject detected, but no mapping exists in labs table",
+                }
+            )
             continue
-        key = (row["Day"], int(row["Period"]))
+
+        if norm(mapped) not in {norm(x) for x in all_rooms}:
+            failures.append(
+                {
+                    "Day": row["Day"],
+                    "Period": row["Period"],
+                    "Class": row["Class"],
+                    "Subject": row["Subject"],
+                    "Reason": f"Lab room {mapped} is not present in rooms table",
+                }
+            )
+            continue
+
+        key = slot_key(row["Day"], row["Period"])
         if norm(mapped) in {norm(x) for x in occupancy[key]}:
-            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": f"Fixed lab clash: {mapped}"})
+            failures.append(
+                {
+                    "Day": row["Day"],
+                    "Period": row["Period"],
+                    "Class": row["Class"],
+                    "Subject": row["Subject"],
+                    "Reason": f"Fixed lab room clash: {mapped}",
+                }
+            )
             continue
+
         occupancy[key].add(mapped)
-        proposed.append({
-            "Day": row["Day"], "Period": int(row["Period"]), "Class": row["Class"], "Subject": row["Subject"],
-            "Faculty": row["Faculty"], "Old Room": row["Room"], "Proposed Room": mapped,
-            "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "ALLOCATED", "Reason": "",
-        })
+        proposed.append(
+            {
+                "Day": row["Day"],
+                "Period": int(row["Period"]),
+                "Class": row["Class"],
+                "Subject": row["Subject"],
+                "Faculty": row["Faculty"],
+                "Old Room": row["Room"],
+                "Proposed Room": mapped,
+                "Allocation": "LAB-FIXED",
+                "Shift Block": "LAB",
+                "Status": "LAB FIXED",
+                "Reason": "",
+            }
+        )
 
-    # 3. Theory Room Allocation (C21 only for Monday Periods 1 and 2 for theory)
-    theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map) or is_special_activity(x))].copy()
+    # Theory groups: class + day + permitted change block.
+    theory_rows = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
-    for _, row in theory.iterrows():
-        groups[(row["Day"], row["Class"], shift_block(int(row["Period"])))].append(row.to_dict())
+    for _, row in theory_rows.iterrows():
+        key = (row["Day"], row["Class"], shift_block(int(row["Period"])))
+        groups[key].append(row.to_dict())
 
-    group_items = sorted(groups.items(), key=lambda kv: (-len(kv[1]), day_order[kv[0][0]], kv[0][2], kv[0][1]))
-    last_room: Dict[Tuple[str, str], str] = {}
-    class_day_rooms: Dict[Tuple[str, str], set] = defaultdict(set)
+    # Prioritize hard blocks first: more periods, earlier in the week, then class.
+    group_items = sorted(
+        groups.items(),
+        key=lambda kv: (-len(kv[1]), DAYS.index(kv[0][0]), kv[0][2], kv[0][1]),
+    )
+
+    last_room_for_class_day: Dict[Tuple[str, str], str] = {}
+    same_class_day_rooms: Dict[Tuple[str, str], set] = defaultdict(set)
+
+    candidate_base = theory_rooms + [r for r in other_rooms if norm(r) not in {norm(x) for x in theory_rooms}]
 
     for (day, cls, block), group in group_items:
         periods = sorted({int(x["Period"]) for x in group})
-        preferred = get_preferred_rooms(cls)
-        
-        all_day_additions = ["B37", "B27"]
-        saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
-        
-        # Rule: C21 allowed ONLY on Monday Morning Slots (Periods 1 and 2) for theory
-        is_monday_1_2 = (day.upper() == "MONDAY") and any(p in [1, 2] for p in periods)
-        monday_additions = ["C21"] if is_monday_1_2 else []
-        
-        active_extra_rooms = all_day_additions + saturday_additions + monday_additions
-        
-        candidate_pool = preferred + active_extra_rooms + [
-            r for r in theory_rooms if r not in preferred and r not in active_extra_rooms
-        ]
+        old_rooms = [clean(x.get("Room", "")) for x in group if clean(x.get("Room", ""))]
+        old_common = ""
+        if old_rooms and len({norm(x) for x in old_rooms}) == 1:
+            old_common = old_rooms[0]
 
-        candidates = []
-        for idx, room in enumerate(candidate_pool):
-            rk = norm(room)
-            if any(rk in {norm(x) for x in occupancy[(day, p)]} for p in periods):
+        candidates: List[Tuple[int, str]] = []
+        occupied_by_slot = {p: {norm(x) for x in occupancy[slot_key(day, p)]} for p in periods}
+
+        for idx, room in enumerate(candidate_base):
+            rkey = norm(room)
+            if any(rkey in occupied_by_slot[p] for p in periods):
                 continue
-            
+
             score = 0
-            if room in preferred:
-                score += 1000000 - (preferred.index(room) * 1000)
-            elif room in active_extra_rooms:
-                score += 500000 - (active_extra_rooms.index(room) * 1000)
-            else:
-                score += 10000 - (idx * 10)
-                
-            prev = last_room.get((cls, day), "")
-            if prev and rk == norm(prev):
+            # Strong preference: preserve the currently stored room.
+            if old_common and rkey == norm(old_common):
+                score += 100000
+            # Strong preference: keep same room across the allowed shift boundary.
+            prev = last_room_for_class_day.get((cls, day), "")
+            if prev and rkey == norm(prev):
                 score += 50000
-            if rk in {norm(x) for x in class_day_rooms[(cls, day)]}:
+            # Reuse one of this class's already used rooms on the same day.
+            if any(rkey == norm(x) for x in same_class_day_rooms[(cls, day)]):
                 score += 15000
-            
+            # Prefer a normal theory room; lab-type rooms are fallback capacity.
+            if room in theory_rooms:
+                score += 5000
+            # Prefer rooms already used across the day to reduce total rooms used.
+            # This is only a soft objective; collision-free allocation has priority.
+            usage_hint = sum(
+                1
+                for x in proposed
+                if x["Day"] == day and norm(x["Proposed Room"]) == rkey
+            )
+            score += min(usage_hint, 20) * 50
+            score -= idx
             candidates.append((score, room))
 
         if not candidates:
             for x in group:
-                proposed.append({
-                    "Day": day, "Period": int(x["Period"]), "Class": cls, "Subject": x["Subject"],
-                    "Faculty": x.get("Faculty", ""), "Old Room": x.get("Room", ""), "Proposed Room": "NOT ALLOCATED",
-                    "Allocation": "FAILED", "Shift Block": block, "Status": "NOT ALLOCATED", "Reason": "No available room in shift block",
-                })
+                proposed.append(
+                    {
+                        "Day": day,
+                        "Period": int(x["Period"]),
+                        "Class": cls,
+                        "Subject": x["Subject"],
+                        "Faculty": x.get("Faculty", ""),
+                        "Old Room": x.get("Room", ""),
+                        "Proposed Room": "UNALLOCATED",
+                        "Allocation": "FAILED",
+                        "Shift Block": block,
+                        "Status": "FAILED",
+                        "Reason": "No room is free for all periods in this shift block",
+                    }
+                )
             continue
 
-        selected_room = max(candidates, key=lambda z: z[0])[1]
-        last_room[(cls, day)] = selected_room
-        class_day_rooms[(cls, day)].add(selected_room)
+        room = max(candidates, key=lambda z: z[0])[1]
+        last_room_for_class_day[(cls, day)] = room
+        same_class_day_rooms[(cls, day)].add(room)
 
         for x in group:
             p = int(x["Period"])
-            occupancy[(day, p)].add(selected_room)
-            old = clean(x.get("Room", ""))
-            proposed.append({
-                "Day": day, "Period": p, "Class": cls, "Subject": x["Subject"], "Faculty": x.get("Faculty", ""),
-                "Old Room": old, "Proposed Room": selected_room, "Allocation": "THEORY-AUTO", "Shift Block": block,
-                "Status": "ALLOCATED", "Reason": "",
-            })
+            occupancy[slot_key(day, p)].add(room)
+            old_room = clean(x.get("Room", ""))
+            status = "UNCHANGED" if old_room and norm(old_room) == norm(room) else "ROOM CHANGE"
+            proposed.append(
+                {
+                    "Day": day,
+                    "Period": p,
+                    "Class": cls,
+                    "Subject": x["Subject"],
+                    "Faculty": x.get("Faculty", ""),
+                    "Old Room": old_room,
+                    "Proposed Room": room,
+                    "Allocation": "THEORY-AUTO",
+                    "Shift Block": block,
+                    "Status": status,
+                    "Reason": "",
+                }
+            )
 
     result = pd.DataFrame(proposed)
     if result.empty:
-        result = pd.DataFrame(columns=["Day", "Period", "Class", "Subject", "Faculty", "Old Room", "Proposed Room", "Allocation", "Shift Block", "Status", "Reason"])
-    result["_d"] = result["Day"].map(day_order)
-    result = result.sort_values(["_d", "Class", "Period", "Subject"]).drop(columns=["_d"]).reset_index(drop=True)
+        result = pd.DataFrame(
+            columns=[
+                "Day", "Period", "Class", "Subject", "Faculty", "Old Room",
+                "Proposed Room", "Allocation", "Shift Block", "Status", "Reason"
+            ]
+        )
+
+    day_order = {d: i for i, d in enumerate(DAYS)}
+    result["_day_order"] = result["Day"].map(day_order)
+    result = result.sort_values(["_day_order", "Class", "Period", "Subject"]).drop(columns=["_day_order"])
+    result = result.reset_index(drop=True)
 
     total = len(timetable)
-    allocated = int((result["Proposed Room"] != "NOT ALLOCATED").sum()) if not result.empty else 0
+    allocated_count = int((result["Proposed Room"] != "UNALLOCATED").sum()) if not result.empty else 0
+    lab_count = int((result["Allocation"] == "LAB-FIXED").sum()) if not result.empty else 0
+    theory_count = int((result["Allocation"] == "THEORY-AUTO").sum()) if not result.empty else 0
+    changes = int((result["Status"] == "ROOM CHANGE").sum()) if not result.empty else 0
+    fallback_theory = 0
+    room_type_lookup = {norm(k): room_type.get(norm(k), "") for k in all_rooms}
+    if not result.empty:
+        for _, r in result[result["Allocation"] == "THEORY-AUTO"].iterrows():
+            if room_is_lab_type(room_type_lookup.get(norm(r["Proposed Room"]), "")):
+                fallback_theory += 1
+
+    room_usage = result[result["Proposed Room"] != "UNALLOCATED"]["Proposed Room"].nunique() if not result.empty else 0
+    unique_current = timetable["Room"].replace("", pd.NA).dropna().nunique()
+
+    # Count actual block transitions per class/day, not period changes within a block.
+    block_changes = 0
+    class_day_block_rooms: Dict[Tuple[str, str], Dict[str, str]] = defaultdict(dict)
+    for _, r in result[result["Allocation"] == "THEORY-AUTO"].iterrows():
+        class_day_block_rooms[(r["Class"], r["Day"])][r["Shift Block"]] = r["Proposed Room"]
+    block_order = {"P1-P2": 1, "P3-P4": 2, "P5-P7": 3}
+    for key, mapping in class_day_block_rooms.items():
+        blocks = sorted(mapping, key=lambda b: block_order[b])
+        for a, b in zip(blocks, blocks[1:]):
+            if norm(mapping[a]) != norm(mapping[b]):
+                block_changes += 1
+
     metrics = {
         "Timetable periods": total,
-        "Allocated": allocated,
-        "Unallocated": total - allocated,
-        "Allocation %": round((allocated / total) * 100, 2) if total else 0.0,
+        "Allocated": allocated_count,
+        "Unallocated": total - allocated_count,
+        "Lab periods fixed": lab_count,
+        "Theory periods": theory_count,
+        "Theory using lab-type rooms": fallback_theory,
+        "Room changes from current timetable": changes,
+        "Allowed block-to-block room changes": block_changes,
+        "Rooms in Supabase": len(all_rooms),
+        "Rooms proposed used": int(room_usage),
+        "Rooms currently used": int(unique_current),
+        "Allocation %": round((allocated_count / total) * 100, 2) if total else 0.0,
     }
-    return result, metrics, pd.DataFrame(failures), occupancy
+
+    return result, metrics, pd.DataFrame(failures)
 
 
-def build_class_grid(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]) -> pd.DataFrame:
-    g = result[result["Class"] == class_name].copy()
-    grid_data = {f"Period {p}": [] for p in PERIODS}
-    
-    for day in DAYS:
+def class_day_mapping(result: pd.DataFrame) -> pd.DataFrame:
+    if result.empty:
+        return pd.DataFrame()
+    rows = []
+    for (cls, day), g in result.groupby(["Class", "Day"], sort=False):
+        row = {"Day": day, "Class": cls}
         for p in PERIODS:
-            x = g[(g["Day"] == day) & (g["Period"] == p)]
-            if x.empty:
-                cell_text = "-"
+            gp = g[g["Period"] == p]
+            if gp.empty:
+                row[f"P{p}"] = "—"
             else:
-                r = x.iloc[0]
-                subj = clean(r["Subject"]) or "-"
-                fac = faculty_map.get(norm(r["Faculty"]), clean(r["Faculty"]))
-                room = clean(r["Proposed Room"])
-                fac_str = f" ({fac})" if fac else ""
-                room_str = f" [{room}]" if room else ""
-                cell_text = f"{subj}{fac_str}{room_str}"
-            grid_data[f"Period {p}"].append(cell_text)
-            
-    df = pd.DataFrame(grid_data)
-    df.insert(0, "Day", DAYS)
-    return df
+                x = gp.iloc[0]
+                room = x["Proposed Room"]
+                subject = x["Subject"]
+                if x["Allocation"] == "LAB-FIXED":
+                    row[f"P{p}"] = f"{room} [LAB]"
+                elif room == "UNALLOCATED":
+                    row[f"P{p}"] = "UNALLOCATED"
+                else:
+                    row[f"P{p}"] = room
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    out["_day"] = out["Day"].map({d: i for i, d in enumerate(DAYS)})
+    return out.sort_values(["_day", "Class"]).drop(columns=["_day"]).reset_index(drop=True)
 
 
-def build_vacant_rooms_grid(rooms: pd.DataFrame, occupancy: Dict[Tuple[str, int], set]) -> pd.DataFrame:
-    all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
-    vacant_records = []
-    
-    for day in DAYS:
-        row = {"Day": day}
-        for p in PERIODS:
-            occupied = occupancy.get((day, p), set())
-            vacant = [r for r in all_rooms if norm(r) not in {norm(x) for x in occupied}]
-            row[f"Period {p}"] = ", ".join(vacant) if vacant else "None"
-        vacant_records.append(row)
-        
-    return pd.DataFrame(vacant_records)
+def room_occupancy(result: pd.DataFrame) -> pd.DataFrame:
+    if result.empty:
+        return pd.DataFrame()
+    rows = []
+    for room, g in result[result["Proposed Room"] != "UNALLOCATED"].groupby("Proposed Room"):
+        row = {"Room": room}
+        for d in DAYS:
+            for p in PERIODS:
+                x = g[(g["Day"] == d) & (g["Period"] == p)]
+                cell = ""
+                if not x.empty:
+                    z = x.iloc[0]
+                    cell = f"{z['Class']} / {z['Subject']}"
+                    if z["Allocation"] == "LAB-FIXED":
+                        cell += " [LAB]"
+                row[f"{d[:3]} P{p}"] = cell
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("Room").reset_index(drop=True)
 
 
-# ==========================================================
-# APP EXECUTION & UI
-# ==========================================================
-st.title("🏫 Timetable & Room Allocation System")
+def timetable_grid(timetable: pd.DataFrame, cls: str | None = None, day: str | None = None) -> pd.DataFrame:
+    df = timetable.copy()
+    if cls and cls != "All":
+        df = df[df["Class"] == cls]
+    if day and day != "All":
+        df = df[df["Day"] == day]
+    if df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for d in DAYS if day in (None, "All") else [day]:
+        for c in sorted(df["Class"].unique()):
+            g = df[(df["Day"] == d) & (df["Class"] == c)]
+            if g.empty:
+                continue
+            row = {"Day": d, "Class": c}
+            for p in PERIODS:
+                x = g[g["Period"] == p]
+                if x.empty:
+                    row[f"P{p}"] = "—"
+                else:
+                    z = x.iloc[0]
+                    room = z["Room"] or "(no room)"
+                    row[f"P{p}"] = f"{z['Subject']}\n[{room}]"
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def to_excel(timetable: pd.DataFrame, proposed: pd.DataFrame, mapping: pd.DataFrame, rooms: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        timetable.to_excel(writer, sheet_name="Current_Timetable", index=False)
+        proposed.to_excel(writer, sheet_name="Proposed_Allocation", index=False)
+        mapping.to_excel(writer, sheet_name="Class_Room_Mapping", index=False)
+        rooms.to_excel(writer, sheet_name="Rooms_Master", index=False)
+    output.seek(0)
+    return output.getvalue()
+
+
+st.title("🏫 Automatic Room Allocation – Independent Program")
+st.caption(
+    "READ-ONLY mode: this application reads Supabase data and calculates room assignments in memory. "
+    "It does not modify the timetable, rooms, labs, or any other Supabase table."
+)
 
 with st.sidebar:
-    st.header("⚙️ Controls")
-    if st.button("🔄 Refresh Data", use_container_width=True):
+    st.header("Controls")
+    if st.button("🔄 Reload Supabase data", use_container_width=True):
         fetch_table.clear()
         st.rerun()
 
-try:
-    with st.spinner("Connecting to Supabase..."):
-        raw_timetable = fetch_table(TABLE_TIMETABLE)
-        raw_rooms = fetch_table(TABLE_ROOMS)
-        raw_labs = fetch_table(TABLE_LABS)
-        raw_faculty = fetch_table(TABLE_FACULTY)
+    st.markdown("### Allocation rules")
+    st.write("• Theory room changes only at P1, P3, and P5")
+    st.write("• One room per class within P1–P2, P3–P4, P5–P7")
+    st.write("• Lab rooms are fixed from the labs table")
+    st.write("• Lab/computer/workshop rooms may be reused before/after labs")
+    st.write("• All rooms from the rooms table are candidates")
+    st.write("• No database writes")
 
+try:
+    with st.spinner("Reading timetable, rooms and lab information from Supabase..."):
+        raw_timetable, raw_rooms, raw_labs = load_data()
         timetable = normalize_timetable(raw_timetable)
         rooms = normalize_rooms(raw_rooms)
         labs = normalize_labs(raw_labs)
-        faculty = normalize_faculty(raw_faculty)
-
-        faculty_map = build_faculty_map(faculty)
-        coordinator_map = build_coordinator_map(faculty)
 except Exception as exc:
-    st.error(f"Error loading database: {exc}")
+    st.error(f"Could not read Supabase data: {exc}")
+    st.info("Check SUPABASE_URL, SUPABASE_KEY, and the table/column names.")
     st.stop()
 
-if timetable.empty or rooms.empty:
-    st.error("Timetable or rooms table is empty.")
+if timetable.empty:
+    st.warning("No timetable rows were found in the Supabase 'timetable' table.")
     st.stop()
 
-proposed, metrics, failures, occupancy = allocate_rooms(timetable, rooms, labs)
+try:
+    proposed, metrics, failures = allocate_rooms(timetable, rooms, labs)
+except Exception as exc:
+    st.error(f"Room allocation failed: {exc}")
+    st.stop()
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total Periods", metrics["Timetable periods"])
-m2.metric("Allocated Periods", metrics["Allocated"])
-m3.metric("Unallocated Slots", metrics["Unallocated"])
-m4.metric("Allocation Rate", f"{metrics['Allocation %']}%")
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("Timetable periods", metrics["Timetable periods"])
+m2.metric("Allocated", metrics["Allocated"])
+m3.metric("Unallocated", metrics["Unallocated"])
+m4.metric("Room changes", metrics["Room changes from current timetable"])
+m5.metric("Rooms available", metrics["Rooms in Supabase"])
+m6.metric("Allocation %", f"{metrics['Allocation %']}%")
 
-st.markdown("<br>", unsafe_allow_html=True)
+if metrics["Unallocated"] == 0:
+    st.success("All timetable periods received a valid proposed room assignment.")
+else:
+    st.warning(f"{metrics['Unallocated']} timetable periods could not be allocated.")
 
-# Tabs
-tab1, tab2, tab3 = st.tabs(["📅 Class Timetable Grid", "🏢 Room Allocations & Unassigned Slots", "🚪 Vacant Rooms Per Day"])
+if failures is not None and not failures.empty:
+    with st.expander("⚠️ Lab/fixed-room problems"):
+        st.dataframe(failures, use_container_width=True, hide_index=True)
 
-with tab1:
-    classes = sorted(timetable["Class"].unique().tolist())
-    selected_class = st.selectbox("📌 Select Class / Section", classes)
+classes = ["All"] + sorted(timetable["Class"].unique().tolist())
+view_day_options = ["All"] + DAYS
+col1, col2 = st.columns(2)
+with col1:
+    selected_class = st.selectbox("Class", classes)
+with col2:
+    selected_day = st.selectbox("Day", view_day_options)
 
-    coord_info = coordinator_map.get(norm(selected_class))
-    if coord_info:
-        st.info(f"👤 **Class Coordinator:** {coord_info['name']} | 📱 **Mobile:** {coord_info['mobile']}")
+# ----------------------------------------------------------
+# Current timetable
+# ----------------------------------------------------------
+st.subheader("1. Current Timetable (from Supabase)")
+current_grid = timetable_grid(timetable, selected_class, selected_day)
+if current_grid.empty:
+    st.info("No timetable entries for the selected filter.")
+else:
+    st.dataframe(current_grid, use_container_width=True, hide_index=True)
 
-    st.subheader(f"Grid Schedule – {selected_class}")
-    grid_df = build_class_grid(proposed, selected_class, faculty_map)
-    st.dataframe(grid_df, use_container_width=True, hide_index=True)
+# ----------------------------------------------------------
+# Proposed allocation
+# ----------------------------------------------------------
+st.subheader("2. Proposed Automatic Room Allocation")
+proposed_display = proposed.copy()
+if selected_class != "All":
+    proposed_display = proposed_display[proposed_display["Class"] == selected_class]
+if selected_day != "All":
+    proposed_display = proposed_display[proposed_display["Day"] == selected_day]
 
-with tab2:
-    st.subheader("🏢 Allocated and Not Allocated Room Details")
-    
-    # Filter controls
-    status_filter = st.radio("Show Slots:", ["All", "ALLOCATED Only", "NOT ALLOCATED Only"], horizontal=True)
-    
-    disp_df = proposed[["Day", "Period", "Class", "Subject", "Faculty", "Proposed Room", "Status"]].copy()
-    
-    if status_filter == "ALLOCATED Only":
-        disp_df = disp_df[disp_df["Status"] == "ALLOCATED"]
-    elif status_filter == "NOT ALLOCATED Only":
-        disp_df = disp_df[disp_df["Status"] == "NOT ALLOCATED"]
-        
-    st.dataframe(disp_df, use_container_width=True, hide_index=True)
+show_cols = [
+    "Day", "Period", "Class", "Subject", "Faculty", "Old Room",
+    "Proposed Room", "Allocation", "Shift Block", "Status", "Reason"
+]
+st.dataframe(
+    proposed_display[show_cols],
+    use_container_width=True,
+    hide_index=True,
+    height=520,
+)
 
-with tab3:
-    st.subheader("🚪 Vacant Rooms Per Day & Period")
-    vacant_df = build_vacant_rooms_grid(rooms, occupancy)
-    st.dataframe(vacant_df, use_container_width=True, hide_index=True)
+# ----------------------------------------------------------
+# Class -> room mapping
+# ----------------------------------------------------------
+st.subheader("3. Class → Room Mapping")
+mapping = class_day_mapping(proposed)
+mapping_display = mapping.copy()
+if selected_class != "All":
+    mapping_display = mapping_display[mapping_display["Class"] == selected_class]
+if selected_day != "All":
+    mapping_display = mapping_display[mapping_display["Day"] == selected_day]
+st.dataframe(mapping_display, use_container_width=True, hide_index=True)
+
+# ----------------------------------------------------------
+# Room occupancy
+# ----------------------------------------------------------
+st.subheader("4. Proposed Room Occupancy")
+occupancy = room_occupancy(proposed)
+st.dataframe(occupancy, use_container_width=True, hide_index=True, height=500)
+
+# ----------------------------------------------------------
+# Details
+# ----------------------------------------------------------
+st.subheader("5. Allocation Details")
+detail_cols = st.columns(4)
+detail_cols[0].write(f"**Lab periods fixed:** {metrics['Lab periods fixed']}")
+detail_cols[1].write(f"**Theory periods:** {metrics['Theory periods']}")
+detail_cols[2].write(f"**Theory using lab-type rooms:** {metrics['Theory using lab-type rooms']}")
+detail_cols[3].write(f"**Allowed block changes:** {metrics['Allowed block-to-block room changes']}")
+detail_cols2 = st.columns(3)
+detail_cols2[0].write(f"**Rooms currently used:** {metrics['Rooms currently used']}")
+detail_cols2[1].write(f"**Rooms proposed used:** {metrics['Rooms proposed used']}")
+detail_cols2[2].write("**Database status:** READ ONLY")
+
+# ----------------------------------------------------------
+# Downloads
+# ----------------------------------------------------------
+st.subheader("6. Export")
+left, right = st.columns(2)
+with left:
+    st.download_button(
+        "⬇️ Download Proposed Allocation CSV",
+        proposed[show_cols].to_csv(index=False).encode("utf-8"),
+        file_name="proposed_room_allocation.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with right:
+    st.download_button(
+        "⬇️ Download Full Excel Report",
+        to_excel(timetable, proposed[show_cols], mapping, rooms),
+        file_name="automatic_room_allocation_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+st.info(
+    "This program is intentionally separate from tt_supabase.py. "
+    "It does not import it, call it, update timetable rows, or write any room allocation back to Supabase. "
+    "The proposed allocation disappears when the app session is restarted unless you export the report."
+)
