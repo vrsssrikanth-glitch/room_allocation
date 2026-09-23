@@ -435,7 +435,7 @@ def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Di
                 subj_color = get_subject_font_color(subj)
 
                 html += f'''
-                <td>
+                <td style="padding: 10px 4px;">
                     <span style="font-weight:bold; font-size:14px; color:{subj_color};">{subj}</span>
                     {fac_str}
                     {room_str}
