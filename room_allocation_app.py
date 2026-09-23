@@ -9,7 +9,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==========================================================
-# STREAMLIT PAGE CONFIG & CARD CSS STYLING
+# STREAMLIT PAGE CONFIG
 # ==========================================================
 
 st.set_page_config(
@@ -17,113 +17,6 @@ st.set_page_config(
     page_icon="🏫",
     layout="wide",
 )
-
-st.markdown("""
-    <style>
-    .main {
-        background-color: #FAFAFA;
-    }
-    
-    div[data-testid="stMetricValue"] {
-        font-size: 28px;
-        font-weight: 700;
-        color: #1E293B;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #FFFFFF;
-        padding: 15px 20px;
-        border-radius: 10px;
-        border: 1px solid #E2E8F0;
-        box-shadow: 0px 2px 4px rgba(0,0,0,0.02);
-    }
-
-    /* Timetable Grid & Cards Styling */
-    .tt-table {
-        width: 100%;
-        border-collapse: separate;
-        border-spacing: 6px;
-        margin-top: 10px;
-    }
-    .tt-table th {
-        background-color: #FAFAFA;
-        color: #333333;
-        font-weight: bold;
-        text-align: center;
-        padding: 8px;
-        font-size: 15px;
-    }
-    .tt-table td {
-        vertical-align: middle;
-        padding: 2px;
-    }
-    .tt-day-label {
-        font-weight: 600;
-        color: #212529;
-        font-size: 14px;
-        padding: 8px 12px !important;
-        white-space: nowrap;
-    }
-    .tt-card {
-        border-radius: 6px;
-        padding: 10px 6px;
-        text-align: center;
-        min-height: 58px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .tt-subject {
-        font-weight: 700;
-        font-size: 12px;
-        line-height: 1.2;
-        margin-bottom: 2px;
-    }
-    .tt-faculty {
-        font-weight: 600;
-        font-size: 11px;
-        line-height: 1.2;
-    }
-    .tt-room {
-        font-weight: 500;
-        font-size: 10px;
-        opacity: 0.85;
-        margin-top: 2px;
-    }
-
-    /* Color Palette Themes */
-    .theme-teal {
-        background-color: #E6F8F3;
-        border-left: 5px solid #00B074;
-    }
-    .theme-teal .tt-subject, .theme-teal .tt-faculty, .theme-teal .tt-room { color: #007A50; }
-
-    .theme-pink {
-        background-color: #FCE8F3;
-        border-left: 5px solid #D63384;
-    }
-    .theme-pink .tt-subject, .theme-pink .tt-faculty, .theme-pink .tt-room { color: #8A1551; }
-
-    .theme-lavender {
-        background-color: #ECEAFB;
-        border-left: 5px solid #4B38B3;
-    }
-    .theme-lavender .tt-subject, .theme-lavender .tt-faculty, .theme-lavender .tt-room { color: #2B1883; }
-
-    .theme-yellow {
-        background-color: #F7FBE2;
-        border-left: 5px solid #84A900;
-    }
-    .theme-yellow .tt-subject, .theme-yellow .tt-faculty, .theme-yellow .tt-room { color: #4B6100; }
-
-    .theme-empty {
-        background-color: #F8F9FA;
-        border: 1px dashed #DEE2E6;
-        color: #ADB5BD;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 PERIODS = [1, 2, 3, 4, 5, 6, 7]
@@ -357,7 +250,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Special Activity Allocation & Rule for EEE-2 Weekly Test
+    # 1. Special Activity Allocation & EEE-2 Weekly Test -> B41
     special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
     for _, row in special_df.iterrows():
         key = (row["Day"], int(row["Period"]))
@@ -365,7 +258,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         subj_norm = norm(row["Subject"])
         assigned_room = None
 
-        # Custom Rule: EEE-2 Weekly Test -> Forced Room B41
         if ("EEE-2" in cls_norm or "EEE 2" in cls_norm) and "WEEKLY TEST" in subj_norm:
             if "B41" not in {norm(x) for x in occupancy[key]}:
                 assigned_room = "B41"
@@ -404,7 +296,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # 3. Theory Room Allocation with Monday C21 Addition
+    # 3. Theory Room Allocation (C21 only for Monday Morning Slots: Periods 1 & 2)
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map) or is_special_activity(x))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -420,8 +312,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         
         all_day_additions = ["B37", "B27"]
         saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
-        # Rule: Allow C21 for Monday slots
-        monday_additions = ["C21"] if day.upper() == "MONDAY" else []
+        
+        # Rule: C21 allowed ONLY on Monday Morning Slots (Periods 1 and 2)
+        is_monday_morning = (day.upper() == "MONDAY") and any(p in [1, 2] for p in periods)
+        monday_additions = ["C21"] if is_monday_morning else []
         
         active_extra_rooms = all_day_additions + saturday_additions + monday_additions
         
@@ -499,50 +393,52 @@ def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
     return faculty_map.get(norm(v), v)
 
 
-def get_subject_color_theme(subject: str) -> str:
+def get_subject_font_color(subject: str) -> str:
     s = norm(subject)
-    if "TEST" in s or "CP" in s or "NSS" in s:
-        return "theme-teal"
-    elif "LAC" in s or "AIT" in s or "LAB" in s:
-        return "theme-pink"
+    if "TEST" in s or "WEEKLY" in s:
+        return "#00875A"  # Green
+    elif "LAC" in s or "AIT" in s:
+        return "#D63384"  # Pink
     elif "CE" in s or "PHY" in s:
-        return "theme-lavender"
-    elif "AI_T" in s or "LIB" in s:
-        return "theme-yellow"
-    return "theme-teal"
+        return "#4B38B3"  # Deep Lavender/Purple
+    elif "AI" in s or "LIB" in s:
+        return "#B76E00"  # Dark Amber/Yellow
+    elif "LAB" in s:
+        return "#0077B6"  # Blue
+    return "#2B2D42"      # Default Dark Charcoal
 
 
 def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]):
     g = result[result["Class"] == class_name].copy()
     
-    html = '<table class="tt-table"><thead><tr><th>Day</th>'
+    html = '<table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; text-align:center; font-family:sans-serif;">'
+    html += '<thead><tr style="background-color:#F0F2F5;"><th>Day</th>'
     for p in PERIODS:
-        html += f'<th>P{p}</th>'
+        html += f'<th>Period {p}</th>'
     html += '</tr></thead><tbody>'
 
     for day in DAYS:
-        html += f'<tr><td class="tt-day-label">{day}</td>'
+        html += f'<tr><td style="font-weight:bold; background-color:#FAFAFA;">{day}</td>'
         for p in PERIODS:
             x = g[(g["Day"] == day) & (g["Period"] == p)]
             if x.empty:
-                html += '<td><div class="tt-card theme-empty"><span class="tt-subject">—</span></div></td>'
+                html += '<td style="color:#A0AEC0;">—</td>'
             else:
                 r = x.iloc[0]
                 subj = clean(r["Subject"]) or "—"
                 fac = faculty_display(r["Faculty"], faculty_map)
                 room = clean(r["Proposed Room"])
-                fac_str = f"({fac})" if fac else ""
-                room_str = f"[{room}]" if room else ""
                 
-                theme_class = get_subject_color_theme(subj)
+                fac_str = f"<br><span style='font-size:12px; color:#555555;'>({fac})</span>" if fac else ""
+                room_str = f"<br><span style='font-size:11px; color:#777777;'>[{room}]</span>" if room else ""
+                
+                subj_color = get_subject_font_color(subj)
 
                 html += f'''
                 <td>
-                    <div class="tt-card {theme_class}">
-                        <div class="tt-subject">{subj}</div>
-                        <div class="tt-faculty">{fac_str}</div>
-                        <div class="tt-room">{room_str}</div>
-                    </div>
+                    <span style="font-weight:bold; font-size:14px; color:{subj_color};">{subj}</span>
+                    {fac_str}
+                    {room_str}
                 </td>
                 '''
         html += '</tr>'
@@ -555,10 +451,9 @@ def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Di
 # APP EXECUTION & UI
 # ==========================================================
 st.title("🏫 Timetable & Automatic Room Allocation")
-st.caption("Powered by Streamlit & Supabase")
 
 with st.sidebar:
-    st.header("⚙️ Administrative Controls")
+    st.header("⚙️ Controls")
     if st.button("🔄 Refresh Data", use_container_width=True):
         fetch_table.clear()
         st.rerun()
