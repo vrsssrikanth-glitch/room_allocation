@@ -30,19 +30,20 @@ TABLE_ROOMS = "rooms"
 TABLE_LABS = "labs"
 TABLE_FACULTY = "faculty"
 
-# Class specific room mapping rules
+# Updated Class-Specific Preferred Room Allocations
 CLASS_ROOM_MAP = {
     "ECE": ["A41", "A42", "A45"],
-    "CAI": ["A46"],
-    "CSM": ["B34", "B35"],
-    "IT": ["B43", "A38"],
-    "CSC": ["B43", "A38"],
-    "CSD": ["B43", "A38"],
-    "CSE": ["B44", "B46", "B47"]
+    "CSE": ["B44", "B46", "B47"],
+    "CSM": ["A46", "A47"],
+    "CAI": ["B43", "B35", "B36", "B34", "A48", "A38"],
+    "IT":  ["B43", "B35", "B36", "B34", "A48", "A38"],
+    "CSC": ["B43", "B35", "B36", "B34", "A48", "A38"],
+    "CSD": ["B43", "B35", "B36", "B34", "A48", "A38"],
+    "EEE": ["B43", "B35", "B36", "B34", "A48", "A38"],
 }
 
-# Rooms excluded from fallback theory classes
-EXCLUDED_THEORY_FALLBACK = {"B41", "B42"}
+# Dynamic Fallback Pool across all days
+GENERAL_FALLBACK_ROOMS = ["B37", "B27"]
 
 COLOR_PALETTE = [
     "#E3F2FD", "#F3E5F5", "#E8F5E9", "#FFF3E0", 
@@ -149,7 +150,7 @@ def normalize_rooms(df: pd.DataFrame) -> pd.DataFrame:
     room_col = find_col(df, "room_id", "room", "room_no", "room_number")
     type_col = find_col(df, "type", "room_type", "category")
     if room_col is None:
-        raise ValueError("rooms table must contain Room_ID (or Room / Room_No / Room_Number).")
+        raise ValueError("rooms table must contain Room_ID.")
     out = pd.DataFrame({
         "Room_ID": df[room_col].map(clean),
         "Type": df[type_col].map(clean) if type_col else "",
@@ -187,8 +188,7 @@ def normalize_faculty(df: pd.DataFrame) -> pd.DataFrame:
         "Is_Coordinator": df[coord_col].map(clean) if coord_col else "",
         "Class_Coordinated": df[class_coord_col].map(clean) if class_coord_col else "",
     })
-    out = out[(out["Faculty_Name"] != "")].copy()
-    return out.reset_index(drop=True)
+    return out[out["Faculty_Name"] != ""].reset_index(drop=True)
 
 
 def build_faculty_map(faculty: pd.DataFrame) -> Dict[str, str]:
@@ -217,11 +217,6 @@ def is_lab(subject: str, lab_map: Dict[str, str]) -> bool:
     return s in lab_map or "LAB" in s
 
 
-def room_is_theory_type(room_type: str) -> bool:
-    t = norm(room_type)
-    return "THEORY" in t or t in {"CLASSROOM", "LECTURE", "LECTURE HALL"}
-
-
 def shift_block(period: int) -> str:
     return SHIFT_BLOCKS[int(period)]
 
@@ -239,12 +234,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame()
 
     lab_map = build_lab_map(labs)
-    all_rooms = [clean(x) for x in rooms["Room_ID"].tolist() if clean(x)]
-    room_type = {norm(r["Room_ID"]): clean(r["Type"]) for _, r in rooms.iterrows()}
-    theory_rooms = [r for r in all_rooms if room_is_theory_type(room_type.get(norm(r), ""))]
-    if not theory_rooms:
-        theory_rooms = all_rooms[:]
-
     occupancy: Dict[Tuple[str, int], set] = defaultdict(set)
     proposed: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -254,7 +243,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # Fixed Labs allocation
+    # 1. Fixed Lab Allocation
     for _, row in ordered.iterrows():
         if not is_lab(row["Subject"], lab_map):
             continue
@@ -273,7 +262,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # Theory Room Allocation
+    # 2. Theory Room Allocation with Updated Rules
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -286,22 +275,30 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     for (day, cls, block), group in group_items:
         periods = sorted({int(x["Period"]) for x in group})
         preferred = get_preferred_rooms(cls)
-        candidates = []
-        candidate_pool = preferred + [r for r in theory_rooms if r not in preferred and norm(r) not in EXCLUDED_THEORY_FALLBACK]
+        
+        # Build dynamic room pool based on Day rules
+        day_pool = preferred + GENERAL_FALLBACK_ROOMS[:]
+        if day == "Saturday":
+            day_pool.append("B02")
 
-        for idx, room in enumerate(candidate_pool):
+        candidates = []
+        for idx, room in enumerate(day_pool):
             rk = norm(room)
             if any(rk in {norm(x) for x in occupancy[(day, p)]} for p in periods):
                 continue
+            
             score = 0
             if room in preferred:
                 score += 1000000 - (preferred.index(room) * 1000)
+            else:
+                score += 100000 - (idx * 500) # General fallback preference
+                
             prev = last_room.get((cls, day), "")
             if prev and rk == norm(prev):
                 score += 50000
             if rk in {norm(x) for x in class_day_rooms[(cls, day)]}:
                 score += 15000
-            score -= idx
+            
             candidates.append((score, room))
 
         if not candidates:
@@ -336,21 +333,47 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
 
     total = len(timetable)
     allocated = int((result["Proposed Room"] != "UNALLOCATED").sum()) if not result.empty else 0
-    lab_count = int((result["Allocation"] == "LAB-FIXED").sum()) if not result.empty else 0
-    theory_count = int((result["Allocation"] == "THEORY-AUTO").sum()) if not result.empty else 0
-    changes = int((result["Status"] == "ROOM CHANGE").sum()) if not result.empty else 0
-
     metrics = {
         "Timetable periods": total,
         "Allocated": allocated,
         "Unallocated": total - allocated,
-        "Lab periods fixed": lab_count,
-        "Theory periods": theory_count,
-        "Room changes from current timetable": changes,
-        "Rooms in Supabase": len(all_rooms),
         "Allocation %": round((allocated / total) * 100, 2) if total else 0.0,
     }
     return result, metrics, pd.DataFrame(failures)
+
+
+def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[float, pd.DataFrame, pd.DataFrame]:
+    if result.empty:
+        return 0.0, pd.DataFrame(), pd.DataFrame()
+
+    all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
+    total_slots_per_day = len(all_rooms) * len(PERIODS)
+    
+    # 1. Per-Day Occupancy Rate
+    day_stats = []
+    for day in DAYS:
+        allocated_in_day = len(result[(result["Day"] == day) & (result["Proposed Room"] != "UNALLOCATED")])
+        rate = round((allocated_in_day / total_slots_per_day) * 100, 2) if total_slots_per_day else 0.0
+        day_stats.append({"Day": day, "Allocated Slots": allocated_in_day, "Total Slot Capacity": total_slots_per_day, "Occupancy Rate (%)": f"{rate}%"})
+
+    day_df = pd.DataFrame(day_stats)
+
+    # 2. Room-Wise Utilization Statistics
+    room_stats = []
+    total_week_slots = len(DAYS) * len(PERIODS)
+    for rm in all_rooms:
+        used_slots = len(result[result["Proposed Room"] == rm])
+        utilization = round((used_slots / total_week_slots) * 100, 2)
+        room_stats.append({"Room": rm, "Weekly Used Slots": used_slots, "Capacity (Slots)": total_week_slots, "Utilization (%)": f"{utilization}%"})
+
+    room_df = pd.DataFrame(room_stats).sort_values("Weekly Used Slots", ascending=False)
+
+    # Overall Occupancy Rate
+    total_capacity = total_slots_per_day * len(DAYS)
+    total_allocated = len(result[result["Proposed Room"] != "UNALLOCATED"])
+    overall_rate = round((total_allocated / total_capacity) * 100, 2) if total_capacity else 0.0
+
+    return overall_rate, day_df, room_df
 
 
 def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
@@ -395,30 +418,6 @@ def class_timetable_grid(result: pd.DataFrame, class_name: str, faculty_map: Dic
     return pd.DataFrame(rows)
 
 
-def vacancy_theory_grid(result: pd.DataFrame, rooms: pd.DataFrame) -> pd.DataFrame:
-    room_type_map = {norm(r["Room_ID"]): clean(r["Type"]) for _, r in rooms.iterrows()}
-    theory_rooms = sorted([
-        clean(x) for x in rooms["Room_ID"].tolist() 
-        if clean(x) and room_is_theory_type(room_type_map.get(norm(x), ""))
-    ], key=lambda x: x.upper())
-
-    rows = []
-    for day in DAYS:
-        row = {"Day": day}
-        for p in PERIODS:
-            used = {
-                norm(x)
-                for x in result.loc[
-                    (result["Day"] == day) & (result["Period"] == p) & (result["Proposed Room"] != "UNALLOCATED"),
-                    "Proposed Room",
-                ]
-            }
-            vacant = [r for r in theory_rooms if norm(r) not in used]
-            row[f"P{p}"] = ", ".join(vacant) if vacant else "— NONE —"
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
 # ==========================================================
 # APP EXECUTION & UI
 # ==========================================================
@@ -436,12 +435,12 @@ try:
         raw_rooms = fetch_table(TABLE_ROOMS)
         raw_labs = fetch_table(TABLE_LABS)
         raw_faculty = fetch_table(TABLE_FACULTY)
-        
+
         timetable = normalize_timetable(raw_timetable)
         rooms = normalize_rooms(raw_rooms)
         labs = normalize_labs(raw_labs)
         faculty = normalize_faculty(raw_faculty)
-        
+
         faculty_map = build_faculty_map(faculty)
         coordinator_map = build_coordinator_map(faculty)
 except Exception as exc:
@@ -453,37 +452,47 @@ if timetable.empty or rooms.empty:
     st.stop()
 
 proposed, metrics, failures = allocate_rooms(timetable, rooms, labs)
+overall_occ, day_occ_df, room_occ_df = calculate_occupancy(proposed, rooms)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Periods", metrics["Timetable periods"])
 m2.metric("Allocated Periods", metrics["Allocated"])
 m3.metric("Unallocated Slots", metrics["Unallocated"])
-m4.metric("Rooms Available", metrics["Rooms in Supabase"])
+m4.metric("Overall Room Occupancy Rate", f"{overall_occ}%")
 
 classes = sorted(timetable["Class"].unique().tolist())
 selected_class = st.selectbox("Select Class / Section", classes)
 
-# Display Class Coordinator Info
+# Class Coordinator Metadata
 coord_info = coordinator_map.get(norm(selected_class))
 if coord_info:
     st.info(f"📋 **Class Coordinator:** {coord_info['name']} | 📱 **Mobile:** {coord_info['mobile']}")
 else:
     st.warning(f"No Class Coordinator assigned to {selected_class} in the Faculty table.")
 
-# 1. Standard Class Timetable View
+# 1. Class Timetable
 st.header(f"Standard Timetable – {selected_class}")
-
 grid_df = class_timetable_grid(proposed, selected_class, faculty_map)
 
-# Color styling for native pandas display
-def style_cell_bg(val):
-    bg = get_subject_color(val)
-    return f"background-color: {bg}; font-weight: 500;"
-
-styled_df = grid_df.style.map(style_cell_bg, subset=[f"P{p}" for p in PERIODS])
+styled_df = grid_df.style.map(
+    lambda val: f"background-color: {get_subject_color(val)}; font-weight: 500;",
+    subset=[f"P{p}" for p in PERIODS]
+)
 st.dataframe(styled_df, use_container_width=True, hide_index=True, height=380)
 
-# 2. Display Unallocated Slots
+# 2. Occupancy Rate Analytics
+st.header("📊 Room Occupancy Analytics")
+tab1, tab2 = st.tabs(["Daily Occupancy Rate", "Room-Wise Utilization Rate"])
+
+with tab1:
+    st.subheader("Day-Wise Occupancy Breakdown")
+    st.dataframe(day_occ_df, use_container_width=True, hide_index=True)
+
+with tab2:
+    st.subheader("Room-Wise Utilization Summary")
+    st.dataframe(room_occ_df, use_container_width=True, hide_index=True)
+
+# 3. Unallocated Slots Summary
 unallocated_df = proposed[proposed["Proposed Room"] == "UNALLOCATED"].copy()
 st.header("⚠️ Unallocated Slots Summary")
 
@@ -496,9 +505,3 @@ if not unallocated_df.empty:
     )
 else:
     st.success("All timetable slots are successfully allocated to rooms!")
-
-# 3. Vacant Theory Rooms View
-st.header(" Vacant Theory Rooms")
-st.caption("Displays available theory rooms per period (excluding lab rooms).")
-theory_vacancies = vacancy_theory_grid(proposed, rooms)
-st.dataframe(theory_vacancies, use_container_width=True, hide_index=True)
