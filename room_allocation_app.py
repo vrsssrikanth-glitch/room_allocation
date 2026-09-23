@@ -230,7 +230,7 @@ def get_preferred_rooms(cls_name: str) -> List[str]:
 
 def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFrame):
     if timetable.empty:
-        return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame()
+        return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame(), {}
 
     lab_map = build_lab_map(labs)
     all_supabase_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
@@ -250,7 +250,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Special Activity Allocation & EEE-2 Weekly Test -> B41
+    # 1. Special Activity Allocation & Rule for EEE-2 Weekly Test
     special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
     for _, row in special_df.iterrows():
         key = (row["Day"], int(row["Period"]))
@@ -383,7 +383,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         "Unallocated": total - allocated,
         "Allocation %": round((allocated / total) * 100, 2) if total else 0.0,
     }
-    return result, metrics, pd.DataFrame(failures)
+    return result, metrics, pd.DataFrame(failures), occupancy
 
 
 def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
@@ -411,14 +411,14 @@ def get_subject_font_color(subject: str) -> str:
 def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]):
     g = result[result["Class"] == class_name].copy()
     
-    html = '<table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; text-align:center; font-family:sans-serif;">'
-    html += '<thead><tr style="background-color:#F0F2F5;"><th>Day</th>'
+    html = '<table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; text-align:center; font-family:sans-serif; border: 1px solid #E2E8F0;">'
+    html += '<thead><tr style="background-color:#F8FAFC;"><th>Day</th>'
     for p in PERIODS:
         html += f'<th>Period {p}</th>'
     html += '</tr></thead><tbody>'
 
     for day in DAYS:
-        html += f'<tr><td style="font-weight:bold; background-color:#FAFAFA;">{day}</td>'
+        html += f'<tr><td style="font-weight:bold; background-color:#FAFAFA; width: 110px;">{day}</td>'
         for p in PERIODS:
             x = g[(g["Day"] == day) & (g["Period"] == p)]
             if x.empty:
@@ -447,10 +447,57 @@ def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Di
     st.markdown(html, unsafe_allow_html=True)
 
 
+def build_room_occupancy_grid(proposed: pd.DataFrame) -> pd.DataFrame:
+    """Builds a Grid Table showing which room is occupied by which class for every day and period."""
+    if proposed.empty:
+        return pd.DataFrame()
+    
+    records = []
+    grouped = proposed[proposed["Proposed Room"] != "UNALLOCATED"].groupby(["Day", "Period", "Proposed Room"])
+    
+    for (day, period, room), df in grouped:
+        cls_list = ", ".join(df["Class"].unique())
+        subj_list = ", ".join(df["Subject"].unique())
+        records.append({
+            "Day": day,
+            "Period": f"P{period}",
+            "Room": room,
+            "Occupants": f"{cls_list} ({subj_list})"
+        })
+        
+    grid_df = pd.DataFrame(records)
+    if grid_df.empty:
+        return pd.DataFrame()
+        
+    pivot = grid_df.pivot(index=["Day", "Room"], columns="Period", values="Occupants").fillna("—")
+    return pivot.reset_index()
+
+
+def build_vacant_rooms_grid(rooms: pd.DataFrame, occupancy: Dict[Tuple[str, int], set]) -> pd.DataFrame:
+    """Lists vacant/unallocated rooms per day and period."""
+    all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
+    
+    vacant_records = []
+    for day in DAYS:
+        for p in PERIODS:
+            occupied = occupancy.get((day, p), set())
+            vacant = [r for r in all_rooms if norm(r) not in {norm(x) for x in occupied}]
+            vacant_records.append({
+                "Day": day,
+                "Period": f"P{p}",
+                "Vacant Count": len(vacant),
+                "Vacant Rooms": ", ".join(vacant) if vacant else "None"
+            })
+            
+    df = pd.DataFrame(vacant_records)
+    pivot = df.pivot(index="Day", columns="Period", values="Vacant Rooms").fillna("None")
+    return pivot.reset_index()
+
+
 # ==========================================================
 # APP EXECUTION & UI
 # ==========================================================
-st.title("🏫 Timetable & Automatic Room Allocation")
+st.title("🏫 Timetable & Room Allocation System")
 
 with st.sidebar:
     st.header("⚙️ Controls")
@@ -480,7 +527,7 @@ if timetable.empty or rooms.empty:
     st.error("Timetable or rooms table is empty.")
     st.stop()
 
-proposed, metrics, failures = allocate_rooms(timetable, rooms, labs)
+proposed, metrics, failures, occupancy = allocate_rooms(timetable, rooms, labs)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Periods", metrics["Timetable periods"])
@@ -490,12 +537,33 @@ m4.metric("Allocation Rate", f"{metrics['Allocation %']}%")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-classes = sorted(timetable["Class"].unique().tolist())
-selected_class = st.selectbox("📌 Select Class / Section", classes)
+# Tabs for Structured Data Presentation
+tab1, tab2, tab3 = st.tabs(["📅 Class Timetable Grid", "🏢 Allocated Rooms Wise Data", "🚪 Vacant Rooms Per Day"])
 
-coord_info = coordinator_map.get(norm(selected_class))
-if coord_info:
-    st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **Mobile:** {coord_info['mobile']}")
+with tab1:
+    classes = sorted(timetable["Class"].unique().tolist())
+    selected_class = st.selectbox("📌 Select Class / Section", classes)
 
-st.subheader(f"📅 Schedule – {selected_class}")
-render_html_timetable(proposed, selected_class, faculty_map)
+    coord_info = coordinator_map.get(norm(selected_class))
+    if coord_info:
+        st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **Mobile:** {coord_info['mobile']}")
+
+    st.subheader(f"📅 Timetable Grid – {selected_class}")
+    render_html_timetable(proposed, selected_class, faculty_map)
+
+with tab2:
+    st.subheader("🏢 Allocated Room Occupancy Master Grid")
+    st.caption("Shows allocated room assignments mapped by Day, Period, and Class.")
+    
+    occupancy_df = build_room_occupancy_grid(proposed)
+    if not occupancy_df.empty:
+        st.dataframe(occupancy_df, use_container_width=True, hide_index=True)
+    else:
+        st.write("No room allocation data available.")
+
+with tab3:
+    st.subheader("🚪 Vacant / Unallocated Rooms Per Day")
+    st.caption("List of available theory rooms for each period across days.")
+    
+    vacant_df = build_vacant_rooms_grid(rooms, occupancy)
+    st.dataframe(vacant_df, use_container_width=True, hide_index=True)
