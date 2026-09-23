@@ -250,7 +250,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Special Activity Allocation & Rule for EEE-2 Weekly Test
+    # 1. Special Activity Allocation (EEE-2 Weekly Test in B41 only)
     special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
     for _, row in special_df.iterrows():
         key = (row["Day"], int(row["Period"]))
@@ -273,7 +273,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             proposed.append({
                 "Day": row["Day"], "Period": int(row["Period"]), "Class": row["Class"], "Subject": row["Subject"],
                 "Faculty": row["Faculty"], "Old Room": row["Room"], "Proposed Room": assigned_room,
-                "Allocation": "SPECIAL-ACTIVITY", "Shift Block": "SPECIAL", "Status": "SPECIAL ASSIGNED", "Reason": "",
+                "Allocation": "SPECIAL-ACTIVITY", "Shift Block": "SPECIAL", "Status": "ALLOCATED", "Reason": "",
             })
         else:
             failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "Special room occupied"})
@@ -293,10 +293,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         proposed.append({
             "Day": row["Day"], "Period": int(row["Period"]), "Class": row["Class"], "Subject": row["Subject"],
             "Faculty": row["Faculty"], "Old Room": row["Room"], "Proposed Room": mapped,
-            "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
+            "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "ALLOCATED", "Reason": "",
         })
 
-    # 3. Theory Room Allocation (C21 only for Monday Morning Slots: Periods 1 & 2)
+    # 3. Theory Room Allocation (C21 only for Monday Periods 1 and 2 for theory)
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map) or is_special_activity(x))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -313,9 +313,9 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         all_day_additions = ["B37", "B27"]
         saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
         
-        # Rule: C21 allowed ONLY on Monday Morning Slots (Periods 1 and 2)
-        is_monday_morning = (day.upper() == "MONDAY") and any(p in [1, 2] for p in periods)
-        monday_additions = ["C21"] if is_monday_morning else []
+        # Rule: C21 allowed ONLY on Monday Morning Slots (Periods 1 and 2) for theory
+        is_monday_1_2 = (day.upper() == "MONDAY") and any(p in [1, 2] for p in periods)
+        monday_additions = ["C21"] if is_monday_1_2 else []
         
         active_extra_rooms = all_day_additions + saturday_additions + monday_additions
         
@@ -349,8 +349,8 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             for x in group:
                 proposed.append({
                     "Day": day, "Period": int(x["Period"]), "Class": cls, "Subject": x["Subject"],
-                    "Faculty": x.get("Faculty", ""), "Old Room": x.get("Room", ""), "Proposed Room": "UNALLOCATED",
-                    "Allocation": "FAILED", "Shift Block": block, "Status": "FAILED", "Reason": "No available room in shift block",
+                    "Faculty": x.get("Faculty", ""), "Old Room": x.get("Room", ""), "Proposed Room": "NOT ALLOCATED",
+                    "Allocation": "FAILED", "Shift Block": block, "Status": "NOT ALLOCATED", "Reason": "No available room in shift block",
                 })
             continue
 
@@ -362,11 +362,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             p = int(x["Period"])
             occupancy[(day, p)].add(selected_room)
             old = clean(x.get("Room", ""))
-            status = "UNCHANGED" if old and norm(old) == norm(selected_room) else "ROOM CHANGE"
             proposed.append({
                 "Day": day, "Period": p, "Class": cls, "Subject": x["Subject"], "Faculty": x.get("Faculty", ""),
                 "Old Room": old, "Proposed Room": selected_room, "Allocation": "THEORY-AUTO", "Shift Block": block,
-                "Status": status, "Reason": "",
+                "Status": "ALLOCATED", "Reason": "",
             })
 
     result = pd.DataFrame(proposed)
@@ -376,7 +375,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     result = result.sort_values(["_d", "Class", "Period", "Subject"]).drop(columns=["_d"]).reset_index(drop=True)
 
     total = len(timetable)
-    allocated = int((result["Proposed Room"] != "UNALLOCATED").sum()) if not result.empty else 0
+    allocated = int((result["Proposed Room"] != "NOT ALLOCATED").sum()) if not result.empty else 0
     metrics = {
         "Timetable periods": total,
         "Allocated": allocated,
@@ -386,112 +385,43 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     return result, metrics, pd.DataFrame(failures), occupancy
 
 
-def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
-    v = clean(value)
-    if not v:
-        return ""
-    return faculty_map.get(norm(v), v)
-
-
-def get_subject_font_color(subject: str) -> str:
-    s = norm(subject)
-    if "TEST" in s or "WEEKLY" in s:
-        return "#00875A"  # Green
-    elif "LAC" in s or "AIT" in s:
-        return "#D63384"  # Pink
-    elif "CE" in s or "PHY" in s:
-        return "#4B38B3"  # Deep Lavender/Purple
-    elif "AI" in s or "LIB" in s:
-        return "#B76E00"  # Dark Amber/Yellow
-    elif "LAB" in s:
-        return "#0077B6"  # Blue
-    return "#2B2D42"      # Default Dark Charcoal
-
-
-def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]):
+def build_class_grid(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]) -> pd.DataFrame:
     g = result[result["Class"] == class_name].copy()
+    grid_data = {f"Period {p}": [] for p in PERIODS}
     
-    html = '<table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; text-align:center; font-family:sans-serif; border: 1px solid #E2E8F0;">'
-    html += '<thead><tr style="background-color:#F8FAFC;"><th>Day</th>'
-    for p in PERIODS:
-        html += f'<th>Period {p}</th>'
-    html += '</tr></thead><tbody>'
-
     for day in DAYS:
-        html += f'<tr><td style="font-weight:bold; background-color:#FAFAFA; width: 110px;">{day}</td>'
         for p in PERIODS:
             x = g[(g["Day"] == day) & (g["Period"] == p)]
             if x.empty:
-                html += '<td style="color:#A0AEC0;">—</td>'
+                cell_text = "-"
             else:
                 r = x.iloc[0]
-                subj = clean(r["Subject"]) or "—"
-                fac = faculty_display(r["Faculty"], faculty_map)
+                subj = clean(r["Subject"]) or "-"
+                fac = faculty_map.get(norm(r["Faculty"]), clean(r["Faculty"]))
                 room = clean(r["Proposed Room"])
-                
-                fac_str = f"<br><span style='font-size:12px; color:#555555;'>({fac})</span>" if fac else ""
-                room_str = f"<br><span style='font-size:11px; color:#777777;'>[{room}]</span>" if room else ""
-                
-                subj_color = get_subject_font_color(subj)
-
-                html += f'''
-                <td style="padding: 10px 4px;">
-                    <span style="font-weight:bold; font-size:14px; color:{subj_color};">{subj}</span>
-                    {fac_str}
-                    {room_str}
-                </td>
-                '''
-        html += '</tr>'
-    html += '</tbody></table>'
-    
-    st.markdown(html, unsafe_allow_html=True)
-
-
-def build_room_occupancy_grid(proposed: pd.DataFrame) -> pd.DataFrame:
-    """Builds a Grid Table showing which room is occupied by which class for every day and period."""
-    if proposed.empty:
-        return pd.DataFrame()
-    
-    records = []
-    grouped = proposed[proposed["Proposed Room"] != "UNALLOCATED"].groupby(["Day", "Period", "Proposed Room"])
-    
-    for (day, period, room), df in grouped:
-        cls_list = ", ".join(df["Class"].unique())
-        subj_list = ", ".join(df["Subject"].unique())
-        records.append({
-            "Day": day,
-            "Period": f"P{period}",
-            "Room": room,
-            "Occupants": f"{cls_list} ({subj_list})"
-        })
-        
-    grid_df = pd.DataFrame(records)
-    if grid_df.empty:
-        return pd.DataFrame()
-        
-    pivot = grid_df.pivot(index=["Day", "Room"], columns="Period", values="Occupants").fillna("—")
-    return pivot.reset_index()
+                fac_str = f" ({fac})" if fac else ""
+                room_str = f" [{room}]" if room else ""
+                cell_text = f"{subj}{fac_str}{room_str}"
+            grid_data[f"Period {p}"].append(cell_text)
+            
+    df = pd.DataFrame(grid_data)
+    df.insert(0, "Day", DAYS)
+    return df
 
 
 def build_vacant_rooms_grid(rooms: pd.DataFrame, occupancy: Dict[Tuple[str, int], set]) -> pd.DataFrame:
-    """Lists vacant/unallocated rooms per day and period."""
     all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
-    
     vacant_records = []
+    
     for day in DAYS:
+        row = {"Day": day}
         for p in PERIODS:
             occupied = occupancy.get((day, p), set())
             vacant = [r for r in all_rooms if norm(r) not in {norm(x) for x in occupied}]
-            vacant_records.append({
-                "Day": day,
-                "Period": f"P{p}",
-                "Vacant Count": len(vacant),
-                "Vacant Rooms": ", ".join(vacant) if vacant else "None"
-            })
-            
-    df = pd.DataFrame(vacant_records)
-    pivot = df.pivot(index="Day", columns="Period", values="Vacant Rooms").fillna("None")
-    return pivot.reset_index()
+            row[f"Period {p}"] = ", ".join(vacant) if vacant else "None"
+        vacant_records.append(row)
+        
+    return pd.DataFrame(vacant_records)
 
 
 # ==========================================================
@@ -537,8 +467,8 @@ m4.metric("Allocation Rate", f"{metrics['Allocation %']}%")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Tabs for Structured Data Presentation
-tab1, tab2, tab3 = st.tabs(["📅 Class Timetable Grid", "🏢 Allocated Rooms Wise Data", "🚪 Vacant Rooms Per Day"])
+# Tabs
+tab1, tab2, tab3 = st.tabs(["📅 Class Timetable Grid", "🏢 Room Allocations & Unassigned Slots", "🚪 Vacant Rooms Per Day"])
 
 with tab1:
     classes = sorted(timetable["Class"].unique().tolist())
@@ -546,24 +476,28 @@ with tab1:
 
     coord_info = coordinator_map.get(norm(selected_class))
     if coord_info:
-        st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **Mobile:** {coord_info['mobile']}")
+        st.info(f"👤 **Class Coordinator:** {coord_info['name']} | 📱 **Mobile:** {coord_info['mobile']}")
 
-    st.subheader(f"📅 Timetable Grid – {selected_class}")
-    render_html_timetable(proposed, selected_class, faculty_map)
+    st.subheader(f"Grid Schedule – {selected_class}")
+    grid_df = build_class_grid(proposed, selected_class, faculty_map)
+    st.dataframe(grid_df, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("🏢 Allocated Room Occupancy Master Grid")
-    st.caption("Shows allocated room assignments mapped by Day, Period, and Class.")
+    st.subheader("🏢 Allocated and Not Allocated Room Details")
     
-    occupancy_df = build_room_occupancy_grid(proposed)
-    if not occupancy_df.empty:
-        st.dataframe(occupancy_df, use_container_width=True, hide_index=True)
-    else:
-        st.write("No room allocation data available.")
+    # Filter controls
+    status_filter = st.radio("Show Slots:", ["All", "ALLOCATED Only", "NOT ALLOCATED Only"], horizontal=True)
+    
+    disp_df = proposed[["Day", "Period", "Class", "Subject", "Faculty", "Proposed Room", "Status"]].copy()
+    
+    if status_filter == "ALLOCATED Only":
+        disp_df = disp_df[disp_df["Status"] == "ALLOCATED"]
+    elif status_filter == "NOT ALLOCATED Only":
+        disp_df = disp_df[disp_df["Status"] == "NOT ALLOCATED"]
+        
+    st.dataframe(disp_df, use_container_width=True, hide_index=True)
 
 with tab3:
-    st.subheader("🚪 Vacant / Unallocated Rooms Per Day")
-    st.caption("List of available theory rooms for each period across days.")
-    
+    st.subheader("🚪 Vacant Rooms Per Day & Period")
     vacant_df = build_vacant_rooms_grid(rooms, occupancy)
     st.dataframe(vacant_df, use_container_width=True, hide_index=True)
