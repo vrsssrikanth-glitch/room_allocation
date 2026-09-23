@@ -42,10 +42,8 @@ CLASS_ROOM_MAP = {
     "EEE": ["B43", "B35", "B36", "B34", "A48", "A38"],
 }
 
-COLOR_PALETTE = [
-    "#E3F2FD", "#F3E5F5", "#E8F5E9", "#FFF3E0", 
-    "#FCE4EC", "#E0F7FA", "#FFFDE7", "#F3E5F5"
-]
+# Special Activity Subject Room Assignments
+SPECIAL_ACTIVITY_ROOMS = ["B41", "B42"]
 
 
 def clean(value: Any) -> str:
@@ -214,6 +212,12 @@ def is_lab(subject: str, lab_map: Dict[str, str]) -> bool:
     return s in lab_map or "LAB" in s
 
 
+def is_special_activity(subject: str) -> bool:
+    s = norm(subject)
+    keywords = ["MAKER", "MAKERS", "LIB", "LIBRARY", "NEWS"]
+    return any(kw in s for kw in keywords)
+
+
 def shift_block(period: int) -> str:
     return SHIFT_BLOCKS[int(period)]
 
@@ -232,7 +236,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
 
     lab_map = build_lab_map(labs)
     
-    # Extract theory rooms directly from Supabase
     all_supabase_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
     theory_rooms = [
         clean(r["Room_ID"]) for _, r in rooms.iterrows() 
@@ -250,10 +253,29 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Fixed Lab Allocation
-    for _, row in ordered.iterrows():
-        if not is_lab(row["Subject"], lab_map):
-            continue
+    # 1. Special Activity Allocation (Makers, Lib, News Hour -> B41 / B42)
+    special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
+    for _, row in special_df.iterrows():
+        key = (row["Day"], int(row["Period"]))
+        assigned_room = None
+        for rm in SPECIAL_ACTIVITY_ROOMS:
+            if norm(rm) not in {norm(x) for x in occupancy[key]}:
+                assigned_room = rm
+                break
+        
+        if assigned_room:
+            occupancy[key].add(assigned_room)
+            proposed.append({
+                "Day": row["Day"], "Period": int(row["Period"]), "Class": row["Class"], "Subject": row["Subject"],
+                "Faculty": row["Faculty"], "Old Room": row["Room"], "Proposed Room": assigned_room,
+                "Allocation": "SPECIAL-ACTIVITY", "Shift Block": "SPECIAL", "Status": "SPECIAL ASSIGNED", "Reason": "",
+            })
+        else:
+            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "B41/B42 occupied"})
+
+    # 2. Fixed Lab Allocation
+    labs_df = ordered[ordered["Subject"].map(lambda x: is_lab(x, lab_map) and not is_special_activity(x))].copy()
+    for _, row in labs_df.iterrows():
         mapped = lab_map.get(norm(row["Subject"]))
         if not mapped:
             failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "Lab missing in labs table"})
@@ -269,8 +291,8 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # 2. Theory Room Allocation with B37, B27 (All Days) and B02 (Saturday Only)
-    theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
+    # 3. Theory Room Allocation
+    theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map) or is_special_activity(x))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
         groups[(row["Day"], row["Class"], shift_block(int(row["Period"])))].append(row.to_dict())
@@ -283,16 +305,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         periods = sorted({int(x["Period"]) for x in group})
         preferred = get_preferred_rooms(cls)
         
-        # Base candidate rooms available for all days
         all_day_additions = ["B37", "B27"]
-        
-        # Room available exclusively on Saturdays
         saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
-        
-        # Combine into active room candidates
         active_extra_rooms = all_day_additions + saturday_additions
         
-        # Construct priority candidate pool
         candidate_pool = preferred + active_extra_rooms + [
             r for r in theory_rooms if r not in preferred and r not in active_extra_rooms
         ]
@@ -370,9 +386,9 @@ def vacancy_theory_grid(result: pd.DataFrame, rooms: pd.DataFrame, selected_day:
         )
         vacant = [r for r in all_supabase_rooms if norm(r) not in occupied_rooms]
         rows.append({
-            "Period": f"Period {p}",
+            "Period": f"P{p}",
             "Vacant Rooms Count": len(vacant),
-            "Available Vacant Rooms": ", ".join(vacant) if vacant else "— NONE (ALL OCCUPIED) —"
+            "Available Vacant Rooms": ", ".join(vacant) if vacant else "— NONE —"
         })
     return pd.DataFrame(rows)
 
@@ -388,7 +404,7 @@ def room_class_occupancy_grid(result: pd.DataFrame, rooms: pd.DataFrame, selecte
             if not match.empty:
                 c_name = match.iloc[0]["Class"]
                 subj = match.iloc[0]["Subject"]
-                row[f"P{p}"] = f"{c_name}\n({subj})"
+                row[f"P{p}"] = f"{c_name} ({subj})"
             else:
                 row[f"P{p}"] = "— VACANT —"
         rows.append(row)
@@ -433,14 +449,6 @@ def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
     return faculty_map.get(norm(v), v)
 
 
-def get_subject_color(subject_str: str) -> str:
-    if not subject_str or subject_str == "—":
-        return "#FFFFFF"
-    subj_clean = subject_str.split("\n")[0].strip().upper()
-    idx = zlib.crc32(subj_clean.encode()) % len(COLOR_PALETTE)
-    return COLOR_PALETTE[idx]
-
-
 def class_timetable_grid(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]) -> pd.DataFrame:
     g = result[result["Class"] == class_name].copy()
     rows = []
@@ -458,12 +466,14 @@ def class_timetable_grid(result: pd.DataFrame, class_name: str, faculty_map: Dic
 
             if r["Allocation"] == "LAB-FIXED":
                 room_txt = f"Room: {room} [LAB]"
+            elif r["Allocation"] == "SPECIAL-ACTIVITY":
+                room_txt = f"Room: {room} [SPECIAL]"
             elif room == "UNALLOCATED":
                 room_txt = "Room: UNALLOCATED"
             else:
                 room_txt = f"Room: {room}"
 
-            row[f"P{p}"] = f"{subject}\n{faculty}\n{room_txt}"
+            row[f"P{p}"] = f"{subject} | {faculty} | {room_txt}"
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -516,19 +526,30 @@ selected_class = st.selectbox("Select Class / Section", classes)
 # Class Coordinator Metadata
 coord_info = coordinator_map.get(norm(selected_class))
 if coord_info:
-    st.info(f"📋 **Class Coordinator:** {coord_info['name']} | 📱 **Mobile:** {coord_info['mobile']}")
+    st.info(f"📋 Class Coordinator: {coord_info['name']} | 📱 Mobile: {coord_info['mobile']}")
 else:
     st.warning(f"No Class Coordinator assigned to {selected_class} in the Faculty table.")
 
-# 1. Class Timetable
+# 1. Class Timetable Alignment
 st.header(f"Standard Timetable – {selected_class}")
 grid_df = class_timetable_grid(proposed, selected_class, faculty_map)
 
-styled_df = grid_df.style.map(
-    lambda val: f"background-color: {get_subject_color(val)}; font-weight: 500;",
-    subset=[f"P{p}" for p in PERIODS]
+# Pure Streamlit DataFrame display without HTML
+st.dataframe(
+    grid_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Day": st.column_config.TextColumn("Day", width="medium"),
+        "P1": st.column_config.TextColumn("P1", width="large"),
+        "P2": st.column_config.TextColumn("P2", width="large"),
+        "P3": st.column_config.TextColumn("P3", width="large"),
+        "P4": st.column_config.TextColumn("P4", width="large"),
+        "P5": st.column_config.TextColumn("P5", width="large"),
+        "P6": st.column_config.TextColumn("P6", width="large"),
+        "P7": st.column_config.TextColumn("P7", width="large"),
+    }
 )
-st.dataframe(styled_df, use_container_width=True, hide_index=True, height=380)
 
 # 2. Detailed Room Occupancy & Vacancy Analysis
 st.header("🏢 Supabase Rooms Matrix & Vacancy Breakdown")
