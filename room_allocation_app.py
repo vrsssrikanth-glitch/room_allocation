@@ -173,7 +173,7 @@ def normalize_faculty(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Faculty_ID", "Faculty_Name", "Mobile", "Is_Coordinator", "Class_Coordinated"])
     id_col = find_col(df, "faculty_id", "id")
-    name_col = find_col(df, "faculty_name", "name")
+    name_col = find_col(df, "name", "faculty_name")
     mobile_col = find_col(df, "mobile", "phone", "contact")
     coord_col = find_col(df, "is_coordinator", "coordinator")
     class_coord_col = find_col(df, "class_coordinated", "class_coordinator")
@@ -232,7 +232,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
 
     lab_map = build_lab_map(labs)
     
-    # Dynamically extract rooms from Supabase rooms table
+    # Extract theory rooms directly from Supabase
     all_supabase_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
     theory_rooms = [
         clean(r["Room_ID"]) for _, r in rooms.iterrows() 
@@ -269,7 +269,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # 2. Theory Room Allocation using dynamic Supabase rooms
+    # 2. Theory Room Allocation with B37, B27 (All Days) and B02 (Saturday Only)
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -283,8 +283,19 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         periods = sorted({int(x["Period"]) for x in group})
         preferred = get_preferred_rooms(cls)
         
-        # Build priority pool: Preferred Rooms -> All Other Supabase Rooms dynamically
-        candidate_pool = preferred + [r for r in theory_rooms if r not in preferred]
+        # Base candidate rooms available for all days
+        all_day_additions = ["B37", "B27"]
+        
+        # Room available exclusively on Saturdays
+        saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
+        
+        # Combine into active room candidates
+        active_extra_rooms = all_day_additions + saturday_additions
+        
+        # Construct priority candidate pool
+        candidate_pool = preferred + active_extra_rooms + [
+            r for r in theory_rooms if r not in preferred and r not in active_extra_rooms
+        ]
 
         candidates = []
         for idx, room in enumerate(candidate_pool):
@@ -295,8 +306,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             score = 0
             if room in preferred:
                 score += 1000000 - (preferred.index(room) * 1000)
+            elif room in active_extra_rooms:
+                score += 500000 - (active_extra_rooms.index(room) * 1000)
             else:
-                score += 10000 - (idx * 10) # Dynamic database fallback priority
+                score += 10000 - (idx * 10)
                 
             prev = last_room.get((cls, day), "")
             if prev and rk == norm(prev):
@@ -389,7 +402,6 @@ def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[floa
     all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
     total_slots_per_day = len(all_rooms) * len(PERIODS)
     
-    # 1. Per-Day Occupancy Rate
     day_stats = []
     for day in DAYS:
         allocated_in_day = len(result[(result["Day"] == day) & (result["Proposed Room"] != "UNALLOCATED")])
@@ -398,7 +410,6 @@ def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[floa
 
     day_df = pd.DataFrame(day_stats)
 
-    # 2. Room-Wise Utilization Statistics
     room_stats = []
     total_week_slots = len(DAYS) * len(PERIODS)
     for rm in all_rooms:
@@ -408,7 +419,6 @@ def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[floa
 
     room_df = pd.DataFrame(room_stats).sort_values("Weekly Used Slots", ascending=False)
 
-    # Overall Occupancy Rate
     total_capacity = total_slots_per_day * len(DAYS)
     total_allocated = len(result[result["Proposed Room"] != "UNALLOCATED"])
     overall_rate = round((total_allocated / total_capacity) * 100, 2) if total_capacity else 0.0
