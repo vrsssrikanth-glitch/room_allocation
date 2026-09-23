@@ -30,7 +30,7 @@ TABLE_ROOMS = "rooms"
 TABLE_LABS = "labs"
 TABLE_FACULTY = "faculty"
 
-# Updated Class-Specific Preferred Room Allocations
+# Preferred Room Mapping
 CLASS_ROOM_MAP = {
     "ECE": ["A41", "A42", "A45"],
     "CSE": ["B44", "B46", "B47"],
@@ -42,7 +42,7 @@ CLASS_ROOM_MAP = {
     "EEE": ["B43", "B35", "B36", "B34", "A48", "A38"],
 }
 
-# Dynamic Fallback Pool across all days
+# General Fallback Rooms
 GENERAL_FALLBACK_ROOMS = ["B37", "B27"]
 
 COLOR_PALETTE = [
@@ -153,7 +153,7 @@ def normalize_rooms(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("rooms table must contain Room_ID.")
     out = pd.DataFrame({
         "Room_ID": df[room_col].map(clean),
-        "Type": df[type_col].map(clean) if type_col else "",
+        "Type": df[type_col].map(clean) if type_col else "Theory",
     })
     out = out[out["Room_ID"] != ""].copy()
     out["_key"] = out["Room_ID"].map(norm)
@@ -234,6 +234,8 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame()
 
     lab_map = build_lab_map(labs)
+    all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
+    
     occupancy: Dict[Tuple[str, int], set] = defaultdict(set)
     proposed: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -262,7 +264,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # 2. Theory Room Allocation with Updated Rules
+    # 2. Theory Room Allocation with Pending Rooms Filling Fallback
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -276,10 +278,15 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         periods = sorted({int(x["Period"]) for x in group})
         preferred = get_preferred_rooms(cls)
         
-        # Build dynamic room pool based on Day rules
+        # Room search sequence: Preferred -> General Fallbacks -> Remaining Database Rooms
         day_pool = preferred + GENERAL_FALLBACK_ROOMS[:]
         if day == "Saturday":
             day_pool.append("B02")
+        
+        # Include any remaining rooms in database as ultimate fallback
+        for extra_r in all_rooms:
+            if extra_r not in day_pool:
+                day_pool.append(extra_r)
 
         candidates = []
         for idx, room in enumerate(day_pool):
@@ -290,8 +297,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             score = 0
             if room in preferred:
                 score += 1000000 - (preferred.index(room) * 1000)
+            elif room in GENERAL_FALLBACK_ROOMS or room == "B02":
+                score += 100000 - (idx * 500)
             else:
-                score += 100000 - (idx * 500) # General fallback preference
+                score += 10000 - (idx * 100) # Standard database fallback
                 
             prev = last_room.get((cls, day), "")
             if prev and rk == norm(prev):
@@ -340,6 +349,41 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         "Allocation %": round((allocated / total) * 100, 2) if total else 0.0,
     }
     return result, metrics, pd.DataFrame(failures)
+
+
+def vacancy_theory_grid(result: pd.DataFrame, rooms: pd.DataFrame, selected_day: str) -> pd.DataFrame:
+    all_rooms = sorted([clean(r) for r in rooms["Room_ID"].unique() if clean(r)])
+    rows = []
+    
+    for p in PERIODS:
+        occupied_rooms = set(
+            result[(result["Day"] == selected_day) & (result["Period"] == p) & (result["Proposed Room"] != "UNALLOCATED")]["Proposed Room"].map(norm)
+        )
+        vacant = [r for r in all_rooms if norm(r) not in occupied_rooms]
+        rows.append({
+            "Period": f"Period {p}",
+            "Vacant Rooms Count": len(vacant),
+            "Available Vacant Rooms": ", ".join(vacant) if vacant else "— NONE (ALL OCCUPIED) —"
+        })
+    return pd.DataFrame(rows)
+
+
+def room_class_occupancy_grid(result: pd.DataFrame, rooms: pd.DataFrame, selected_day: str) -> pd.DataFrame:
+    all_rooms = sorted([clean(r) for r in rooms["Room_ID"].unique() if clean(r)])
+    rows = []
+    
+    for room in all_rooms:
+        row = {"Room": room}
+        for p in PERIODS:
+            match = result[(result["Day"] == selected_day) & (result["Period"] == p) & (result["Proposed Room"] == room)]
+            if not match.empty:
+                c_name = match.iloc[0]["Class"]
+                subj = match.iloc[0]["Subject"]
+                row[f"P{p}"] = f"{c_name}\n({subj})"
+            else:
+                row[f"P{p}"] = "— VACANT —"
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[float, pd.DataFrame, pd.DataFrame]:
@@ -458,7 +502,7 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Periods", metrics["Timetable periods"])
 m2.metric("Allocated Periods", metrics["Allocated"])
 m3.metric("Unallocated Slots", metrics["Unallocated"])
-m4.metric("Overall Room Occupancy Rate", f"{overall_occ}%")
+m4.metric("Overall Room Occupancy", f"{overall_occ}%")
 
 classes = sorted(timetable["Class"].unique().tolist())
 selected_class = st.selectbox("Select Class / Section", classes)
@@ -480,19 +524,33 @@ styled_df = grid_df.style.map(
 )
 st.dataframe(styled_df, use_container_width=True, hide_index=True, height=380)
 
-# 2. Occupancy Rate Analytics
-st.header("📊 Room Occupancy Analytics")
-tab1, tab2 = st.tabs(["Daily Occupancy Rate", "Room-Wise Utilization Rate"])
+# 2. Detailed Room Occupancy & Vacancy Analysis
+st.header("🏢 Detailed Room Occupancy & Vacancy Grid")
+day_filter = st.selectbox("Select Day to View Room Matrix & Vacancy", DAYS)
+
+tab_room1, tab_room2 = st.tabs(["Class Occupancy in Rooms Matrix", "Vacant Rooms per Period Grid"])
+
+with tab_room1:
+    st.subheader(f"Room-wise Class Occupancy ({day_filter})")
+    room_matrix = room_class_occupancy_grid(proposed, rooms, day_filter)
+    st.dataframe(room_matrix, use_container_width=True, hide_index=True)
+
+with tab_room2:
+    st.subheader(f"Vacant Rooms Summary ({day_filter})")
+    vacant_matrix = vacancy_theory_grid(proposed, rooms, day_filter)
+    st.dataframe(vacant_matrix, use_container_width=True, hide_index=True)
+
+# 3. Overall Occupancy Rate Analytics
+st.header("📊 Room Occupancy Rate Summaries")
+tab1, tab2 = st.tabs(["Daily Occupancy Rates", "Room-Wise Utilization Rate"])
 
 with tab1:
-    st.subheader("Day-Wise Occupancy Breakdown")
     st.dataframe(day_occ_df, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("Room-Wise Utilization Summary")
     st.dataframe(room_occ_df, use_container_width=True, hide_index=True)
 
-# 3. Unallocated Slots Summary
+# 4. Unallocated Slots Summary
 unallocated_df = proposed[proposed["Proposed Room"] == "UNALLOCATED"].copy()
 st.header("⚠️ Unallocated Slots Summary")
 
