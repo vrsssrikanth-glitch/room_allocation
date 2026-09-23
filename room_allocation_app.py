@@ -9,14 +9,129 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==========================================================
-# INDEPENDENT / READ-ONLY ROOM ALLOCATION APPLICATION
+# STREAMLIT PAGE CONFIG & RENDER-READY THEME
 # ==========================================================
 
 st.set_page_config(
-    page_title="Timetable & Automatic Room Allocation",
+    page_title="Timetable & Room Allocation System",
     page_icon="🏫",
     layout="wide",
 )
+
+# Custom Styling to match your exact card layout
+st.markdown("""
+    <style>
+    /* Global Page Styling */
+    .main {
+        background-color: #FAFAFA;
+    }
+    
+    /* Header & Card Styling */
+    div[data-testid="stMetricValue"] {
+        font-size: 28px;
+        font-weight: 700;
+        color: #1E293B;
+    }
+    div[data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        padding: 15px 20px;
+        border-radius: 10px;
+        border: 1px solid #E2E8F0;
+        box-shadow: 0px 2px 4px rgba(0,0,0,0.02);
+    }
+    
+    /* Sidebar Cleanup */
+    section[data-testid="stSidebar"] {
+        background-color: #F8FAFC;
+        border-right: 1px solid #E2E8F0;
+    }
+
+    /* Timetable Grid & Cards Styling */
+    .tt-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 6px;
+        margin-top: 10px;
+    }
+    .tt-table th {
+        background-color: #FAFAFA;
+        color: #333333;
+        font-weight: bold;
+        text-align: center;
+        padding: 8px;
+        font-size: 15px;
+    }
+    .tt-table td {
+        vertical-align: middle;
+        padding: 2px;
+    }
+    .tt-day-label {
+        font-weight: 600;
+        color: #212529;
+        font-size: 14px;
+        padding: 8px 12px !important;
+        white-space: nowrap;
+    }
+    .tt-card {
+        border-radius: 6px;
+        padding: 10px 6px;
+        text-align: center;
+        min-height: 52px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .tt-subject {
+        font-weight: 700;
+        font-size: 12px;
+        line-height: 1.2;
+        margin-bottom: 2px;
+    }
+    .tt-faculty {
+        font-weight: 600;
+        font-size: 11px;
+        line-height: 1.2;
+    }
+
+    /* Color Palette matching screenshot */
+    /* Light Teal / Mint Green */
+    .theme-teal {
+        background-color: #E6F8F3;
+        border-left: 4px solid #00B074;
+    }
+    .theme-teal .tt-subject, .theme-teal .tt-faculty { color: #007A50; }
+
+    /* Light Pink / Purple */
+    .theme-pink {
+        background-color: #FCE8F3;
+        border-left: 4px solid #D63384;
+    }
+    .theme-pink .tt-subject, .theme-pink .tt-faculty { color: #8A1551; }
+
+    /* Soft Lavender / Blue */
+    .theme-lavender {
+        background-color: #ECEAFB;
+        border-left: 4px solid #4B38B3;
+    }
+    .theme-lavender .tt-subject, .theme-lavender .tt-faculty { color: #2B1883; }
+
+    /* Light Yellow / Lime */
+    .theme-yellow {
+        background-color: #F7FBE2;
+        border-left: 4px solid #84A900;
+    }
+    .theme-yellow .tt-subject, .theme-yellow .tt-faculty { color: #4B6100; }
+
+    /* Empty / Free Slot */
+    .theme-empty {
+        background-color: #F8F9FA;
+        border: 1px dashed #DEE2E6;
+        color: #ADB5BD;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 PERIODS = [1, 2, 3, 4, 5, 6, 7]
@@ -30,7 +145,6 @@ TABLE_ROOMS = "rooms"
 TABLE_LABS = "labs"
 TABLE_FACULTY = "faculty"
 
-# Preferred Class-to-Room Mapping Rules
 CLASS_ROOM_MAP = {
     "ECE": ["A41", "A42", "A45"],
     "CSE": ["B44", "B46", "B47"],
@@ -42,7 +156,6 @@ CLASS_ROOM_MAP = {
     "EEE": ["B43", "B35", "B36", "B34", "A48", "A38"],
 }
 
-# Special Activity Subject Room Assignments
 SPECIAL_ACTIVITY_ROOMS = ["B41", "B42"]
 
 
@@ -71,7 +184,7 @@ def get_supabase() -> Client:
     url = env_value("SUPABASE_URL")
     key = env_value("SUPABASE_KEY")
     if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required.")
+        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables are required.")
     return create_client(url, key)
 
 
@@ -235,7 +348,6 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         return timetable.copy(), {"Timetable periods": 0}, pd.DataFrame()
 
     lab_map = build_lab_map(labs)
-    
     all_supabase_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
     theory_rooms = [
         clean(r["Room_ID"]) for _, r in rooms.iterrows() 
@@ -253,7 +365,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Special Activity Allocation (Makers, Lib, News Hour -> B41 / B42)
+    # 1. Special Activity Allocation
     special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
     for _, row in special_df.iterrows():
         key = (row["Day"], int(row["Period"]))
@@ -376,121 +488,79 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     return result, metrics, pd.DataFrame(failures)
 
 
-def vacancy_theory_grid(result: pd.DataFrame, rooms: pd.DataFrame, selected_day: str) -> pd.DataFrame:
-    all_supabase_rooms = sorted([clean(r) for r in rooms["Room_ID"].unique() if clean(r)])
-    rows = []
-    
-    for p in PERIODS:
-        occupied_rooms = set(
-            result[(result["Day"] == selected_day) & (result["Period"] == p) & (result["Proposed Room"] != "UNALLOCATED")]["Proposed Room"].map(norm)
-        )
-        vacant = [r for r in all_supabase_rooms if norm(r) not in occupied_rooms]
-        rows.append({
-            "Period": f"P{p}",
-            "Vacant Rooms Count": len(vacant),
-            "Available Vacant Rooms": ", ".join(vacant) if vacant else "— NONE —"
-        })
-    return pd.DataFrame(rows)
-
-
-def room_class_occupancy_grid(result: pd.DataFrame, rooms: pd.DataFrame, selected_day: str) -> pd.DataFrame:
-    all_supabase_rooms = sorted([clean(r) for r in rooms["Room_ID"].unique() if clean(r)])
-    rows = []
-    
-    for room in all_supabase_rooms:
-        row = {"Room": room}
-        for p in PERIODS:
-            match = result[(result["Day"] == selected_day) & (result["Period"] == p) & (result["Proposed Room"] == room)]
-            if not match.empty:
-                c_name = match.iloc[0]["Class"]
-                subj = match.iloc[0]["Subject"]
-                row[f"P{p}"] = f"{c_name} ({subj})"
-            else:
-                row[f"P{p}"] = "— VACANT —"
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def calculate_occupancy(result: pd.DataFrame, rooms: pd.DataFrame) -> Tuple[float, pd.DataFrame, pd.DataFrame]:
-    if result.empty:
-        return 0.0, pd.DataFrame(), pd.DataFrame()
-
-    all_rooms = [clean(r) for r in rooms["Room_ID"].unique() if clean(r)]
-    total_slots_per_day = len(all_rooms) * len(PERIODS)
-    
-    day_stats = []
-    for day in DAYS:
-        allocated_in_day = len(result[(result["Day"] == day) & (result["Proposed Room"] != "UNALLOCATED")])
-        rate = round((allocated_in_day / total_slots_per_day) * 100, 2) if total_slots_per_day else 0.0
-        day_stats.append({"Day": day, "Allocated Slots": allocated_in_day, "Total Slot Capacity": total_slots_per_day, "Occupancy Rate (%)": f"{rate}%"})
-
-    day_df = pd.DataFrame(day_stats)
-
-    room_stats = []
-    total_week_slots = len(DAYS) * len(PERIODS)
-    for rm in all_rooms:
-        used_slots = len(result[result["Proposed Room"] == rm])
-        utilization = round((used_slots / total_week_slots) * 100, 2)
-        room_stats.append({"Room": rm, "Weekly Used Slots": used_slots, "Capacity (Slots)": total_week_slots, "Utilization (%)": f"{utilization}%"})
-
-    room_df = pd.DataFrame(room_stats).sort_values("Weekly Used Slots", ascending=False)
-
-    total_capacity = total_slots_per_day * len(DAYS)
-    total_allocated = len(result[result["Proposed Room"] != "UNALLOCATED"])
-    overall_rate = round((total_allocated / total_capacity) * 100, 2) if total_capacity else 0.0
-
-    return overall_rate, day_df, room_df
-
-
 def faculty_display(value: str, faculty_map: Dict[str, str]) -> str:
     v = clean(value)
     if not v:
-        return "—"
+        return ""
     return faculty_map.get(norm(v), v)
 
 
-def class_timetable_grid(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]) -> pd.DataFrame:
+def get_subject_color_theme(subject: str) -> str:
+    s = norm(subject)
+    if "TEST" in s or "CP" in s or "NSS" in s:
+        return "theme-teal"
+    elif "LAC" in s or "AIT" in s or "LAB" in s:
+        return "theme-pink"
+    elif "CE" in s or "PHY" in s:
+        return "theme-lavender"
+    elif "AI_T" in s or "LIB" in s:
+        return "theme-yellow"
+    return "theme-teal"
+
+
+def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Dict[str, str]):
     g = result[result["Class"] == class_name].copy()
-    rows = []
+    
+    html = '<table class="tt-table"><thead><tr><th>Day</th>'
+    for p in PERIODS:
+        html += f'<th>P{p}</th>'
+    html += '</tr></thead><tbody>'
+
     for day in DAYS:
-        row: Dict[str, str] = {"Day": day}
+        html += f'<tr><td class="tt-day-label">{day}</td>'
         for p in PERIODS:
             x = g[(g["Day"] == day) & (g["Period"] == p)]
             if x.empty:
-                row[f"P{p}"] = "—"
-                continue
-            r = x.iloc[0]
-            room = clean(r["Proposed Room"])
-            subject = clean(r["Subject"]) or "—"
-            faculty = faculty_display(r["Faculty"], faculty_map)
-
-            if r["Allocation"] == "LAB-FIXED":
-                room_txt = f"Room: {room} [LAB]"
-            elif r["Allocation"] == "SPECIAL-ACTIVITY":
-                room_txt = f"Room: {room} [SPECIAL]"
-            elif room == "UNALLOCATED":
-                room_txt = "Room: UNALLOCATED"
+                html += '<td><div class="tt-card theme-empty"><span class="tt-subject">—</span></div></td>'
             else:
-                room_txt = f"Room: {room}"
+                r = x.iloc[0]
+                subj = clean(r["Subject"]) or "—"
+                fac = faculty_display(r["Faculty"], faculty_map)
+                fac_str = f"({fac})" if fac else ""
+                
+                theme_class = get_subject_color_theme(subj)
 
-            row[f"P{p}"] = f"{subject} | {faculty} | {room_txt}"
-        rows.append(row)
-    return pd.DataFrame(rows)
+                html += f'''
+                <td>
+                    <div class="tt-card {theme_class}">
+                        <div class="tt-subject">{subj}</div>
+                        <div class="tt-faculty">{fac_str}</div>
+                    </div>
+                </td>
+                '''
+        html += '</tr>'
+    html += 'tbody></table>'
+    
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # ==========================================================
 # APP EXECUTION & UI
 # ==========================================================
-st.title("🏫 Standard Timetable & Room Allocation")
+st.title("🏫 Timetable & Automatic Room Allocation")
+st.caption("Powered by Streamlit & Supabase")
 
 with st.sidebar:
-    st.header("Controls")
-    if st.button("🔄 Reload Supabase data", use_container_width=True):
+    st.header("⚙️ Administrative Controls")
+    if st.button("🔄 Refresh Data", use_container_width=True):
         fetch_table.clear()
         st.rerun()
+    st.markdown("---")
+    st.markdown("**System Details**")
+    st.text("Special Activity Rooms:\nB41 & B42 (Makers, Lib, News)")
 
 try:
-    with st.spinner("Fetching data from Supabase..."):
+    with st.spinner("Connecting to Supabase..."):
         raw_timetable = fetch_table(TABLE_TIMETABLE)
         raw_rooms = fetch_table(TABLE_ROOMS)
         raw_labs = fetch_table(TABLE_LABS)
@@ -504,7 +574,7 @@ try:
         faculty_map = build_faculty_map(faculty)
         coordinator_map = build_coordinator_map(faculty)
 except Exception as exc:
-    st.error(f"Could not read Supabase data: {exc}")
+    st.error(f"Error loading database: {exc}")
     st.stop()
 
 if timetable.empty or rooms.empty:
@@ -512,81 +582,23 @@ if timetable.empty or rooms.empty:
     st.stop()
 
 proposed, metrics, failures = allocate_rooms(timetable, rooms, labs)
-overall_occ, day_occ_df, room_occ_df = calculate_occupancy(proposed, rooms)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Periods", metrics["Timetable periods"])
 m2.metric("Allocated Periods", metrics["Allocated"])
 m3.metric("Unallocated Slots", metrics["Unallocated"])
-m4.metric("Overall Room Occupancy", f"{overall_occ}%")
+m4.metric("Allocation Rate", f"{metrics['Allocation %']}%")
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 classes = sorted(timetable["Class"].unique().tolist())
-selected_class = st.selectbox("Select Class / Section", classes)
+selected_class = st.selectbox("📌 Select Class / Section", classes)
 
-# Class Coordinator Metadata
+# Class Coordinator Details
 coord_info = coordinator_map.get(norm(selected_class))
 if coord_info:
-    st.info(f"📋 Class Coordinator: {coord_info['name']} | 📱 Mobile: {coord_info['mobile']}")
-else:
-    st.warning(f"No Class Coordinator assigned to {selected_class} in the Faculty table.")
+    st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **Mobile:** {coord_info['mobile']}")
 
-# 1. Class Timetable Alignment
-st.header(f"Standard Timetable – {selected_class}")
-grid_df = class_timetable_grid(proposed, selected_class, faculty_map)
-
-# Pure Streamlit DataFrame display without HTML
-st.dataframe(
-    grid_df,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Day": st.column_config.TextColumn("Day", width="medium"),
-        "P1": st.column_config.TextColumn("P1", width="large"),
-        "P2": st.column_config.TextColumn("P2", width="large"),
-        "P3": st.column_config.TextColumn("P3", width="large"),
-        "P4": st.column_config.TextColumn("P4", width="large"),
-        "P5": st.column_config.TextColumn("P5", width="large"),
-        "P6": st.column_config.TextColumn("P6", width="large"),
-        "P7": st.column_config.TextColumn("P7", width="large"),
-    }
-)
-
-# 2. Detailed Room Occupancy & Vacancy Analysis
-st.header("🏢 Supabase Rooms Matrix & Vacancy Breakdown")
-day_filter = st.selectbox("Select Day to View Room Matrix & Vacancy", DAYS)
-
-tab_room1, tab_room2 = st.tabs(["Class Occupancy in Rooms Matrix", "Vacant Rooms per Period Grid"])
-
-with tab_room1:
-    st.subheader(f"Room-wise Class Occupancy ({day_filter})")
-    room_matrix = room_class_occupancy_grid(proposed, rooms, day_filter)
-    st.dataframe(room_matrix, use_container_width=True, hide_index=True)
-
-with tab_room2:
-    st.subheader(f"Vacant Rooms Summary ({day_filter})")
-    vacant_matrix = vacancy_theory_grid(proposed, rooms, day_filter)
-    st.dataframe(vacant_matrix, use_container_width=True, hide_index=True)
-
-# 3. Overall Occupancy Rate Analytics
-st.header("📊 Room Occupancy Rate Summaries")
-tab1, tab2 = st.tabs(["Daily Occupancy Rates", "Room-Wise Utilization Rate"])
-
-with tab1:
-    st.dataframe(day_occ_df, use_container_width=True, hide_index=True)
-
-with tab2:
-    st.dataframe(room_occ_df, use_container_width=True, hide_index=True)
-
-# 4. Unallocated Slots Summary
-unallocated_df = proposed[proposed["Proposed Room"] == "UNALLOCATED"].copy()
-st.header("⚠️ Unallocated Slots Summary")
-
-if not unallocated_df.empty:
-    st.warning(f"There are {len(unallocated_df)} unallocated class slots requiring attention:")
-    st.dataframe(
-        unallocated_df[["Day", "Period", "Class", "Subject", "Faculty", "Reason"]], 
-        use_container_width=True, 
-        hide_index=True
-    )
-else:
-    st.success("All timetable slots are successfully allocated to rooms!")
+# Render Visual Card Timetable Grid
+st.subheader(f"📅 Schedule – {selected_class}")
+render_html_timetable(proposed, selected_class, faculty_map)
