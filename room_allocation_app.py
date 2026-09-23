@@ -9,7 +9,7 @@ import streamlit as st
 from supabase import Client, create_client
 
 # ==========================================================
-# STREAMLIT PAGE CONFIG & RENDER-READY THEME
+# STREAMLIT PAGE CONFIG & CARD CSS STYLING
 # ==========================================================
 
 st.set_page_config(
@@ -18,15 +18,12 @@ st.set_page_config(
     layout="wide",
 )
 
-# Custom Styling to match your exact card layout
 st.markdown("""
     <style>
-    /* Global Page Styling */
     .main {
         background-color: #FAFAFA;
     }
     
-    /* Header & Card Styling */
     div[data-testid="stMetricValue"] {
         font-size: 28px;
         font-weight: 700;
@@ -38,12 +35,6 @@ st.markdown("""
         border-radius: 10px;
         border: 1px solid #E2E8F0;
         box-shadow: 0px 2px 4px rgba(0,0,0,0.02);
-    }
-    
-    /* Sidebar Cleanup */
-    section[data-testid="stSidebar"] {
-        background-color: #F8FAFC;
-        border-right: 1px solid #E2E8F0;
     }
 
     /* Timetable Grid & Cards Styling */
@@ -76,7 +67,7 @@ st.markdown("""
         border-radius: 6px;
         padding: 10px 6px;
         text-align: center;
-        min-height: 52px;
+        min-height: 58px;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -94,37 +85,38 @@ st.markdown("""
         font-size: 11px;
         line-height: 1.2;
     }
+    .tt-room {
+        font-weight: 500;
+        font-size: 10px;
+        opacity: 0.85;
+        margin-top: 2px;
+    }
 
-    /* Color Palette matching screenshot */
-    /* Light Teal / Mint Green */
+    /* Color Palette Themes */
     .theme-teal {
         background-color: #E6F8F3;
-        border-left: 4px solid #00B074;
+        border-left: 5px solid #00B074;
     }
-    .theme-teal .tt-subject, .theme-teal .tt-faculty { color: #007A50; }
+    .theme-teal .tt-subject, .theme-teal .tt-faculty, .theme-teal .tt-room { color: #007A50; }
 
-    /* Light Pink / Purple */
     .theme-pink {
         background-color: #FCE8F3;
-        border-left: 4px solid #D63384;
+        border-left: 5px solid #D63384;
     }
-    .theme-pink .tt-subject, .theme-pink .tt-faculty { color: #8A1551; }
+    .theme-pink .tt-subject, .theme-pink .tt-faculty, .theme-pink .tt-room { color: #8A1551; }
 
-    /* Soft Lavender / Blue */
     .theme-lavender {
         background-color: #ECEAFB;
-        border-left: 4px solid #4B38B3;
+        border-left: 5px solid #4B38B3;
     }
-    .theme-lavender .tt-subject, .theme-lavender .tt-faculty { color: #2B1883; }
+    .theme-lavender .tt-subject, .theme-lavender .tt-faculty, .theme-lavender .tt-room { color: #2B1883; }
 
-    /* Light Yellow / Lime */
     .theme-yellow {
         background-color: #F7FBE2;
-        border-left: 4px solid #84A900;
+        border-left: 5px solid #84A900;
     }
-    .theme-yellow .tt-subject, .theme-yellow .tt-faculty { color: #4B6100; }
+    .theme-yellow .tt-subject, .theme-yellow .tt-faculty, .theme-yellow .tt-room { color: #4B6100; }
 
-    /* Empty / Free Slot */
     .theme-empty {
         background-color: #F8F9FA;
         border: 1px dashed #DEE2E6;
@@ -327,7 +319,7 @@ def is_lab(subject: str, lab_map: Dict[str, str]) -> bool:
 
 def is_special_activity(subject: str) -> bool:
     s = norm(subject)
-    keywords = ["MAKER", "MAKERS", "LIB", "LIBRARY", "NEWS"]
+    keywords = ["MAKER", "MAKERS", "LIB", "LIBRARY", "NEWS", "WEEKLY TEST", "TEST"]
     return any(kw in s for kw in keywords)
 
 
@@ -365,15 +357,24 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
     ordered["_d"] = ordered["Day"].map(day_order)
     ordered = ordered.sort_values(["_d", "Period", "Class", "Subject"]).drop(columns=["_d"])
 
-    # 1. Special Activity Allocation
+    # 1. Special Activity Allocation & Rule for EEE-2 Weekly Test
     special_df = ordered[ordered["Subject"].map(is_special_activity)].copy()
     for _, row in special_df.iterrows():
         key = (row["Day"], int(row["Period"]))
+        cls_norm = norm(row["Class"])
+        subj_norm = norm(row["Subject"])
         assigned_room = None
-        for rm in SPECIAL_ACTIVITY_ROOMS:
-            if norm(rm) not in {norm(x) for x in occupancy[key]}:
-                assigned_room = rm
-                break
+
+        # Custom Rule: EEE-2 Weekly Test -> Forced Room B41
+        if ("EEE-2" in cls_norm or "EEE 2" in cls_norm) and "WEEKLY TEST" in subj_norm:
+            if "B41" not in {norm(x) for x in occupancy[key]}:
+                assigned_room = "B41"
+
+        if not assigned_room:
+            for rm in SPECIAL_ACTIVITY_ROOMS:
+                if norm(rm) not in {norm(x) for x in occupancy[key]}:
+                    assigned_room = rm
+                    break
         
         if assigned_room:
             occupancy[key].add(assigned_room)
@@ -383,7 +384,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
                 "Allocation": "SPECIAL-ACTIVITY", "Shift Block": "SPECIAL", "Status": "SPECIAL ASSIGNED", "Reason": "",
             })
         else:
-            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "B41/B42 occupied"})
+            failures.append({"Day": row["Day"], "Period": row["Period"], "Class": row["Class"], "Subject": row["Subject"], "Reason": "Special room occupied"})
 
     # 2. Fixed Lab Allocation
     labs_df = ordered[ordered["Subject"].map(lambda x: is_lab(x, lab_map) and not is_special_activity(x))].copy()
@@ -403,7 +404,7 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
             "Allocation": "LAB-FIXED", "Shift Block": "LAB", "Status": "LAB FIXED", "Reason": "",
         })
 
-    # 3. Theory Room Allocation
+    # 3. Theory Room Allocation with Monday C21 Addition
     theory = ordered[~ordered["Subject"].map(lambda x: is_lab(x, lab_map) or is_special_activity(x))].copy()
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory.iterrows():
@@ -419,7 +420,10 @@ def allocate_rooms(timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFr
         
         all_day_additions = ["B37", "B27"]
         saturday_additions = ["B02"] if day.upper() == "SATURDAY" else []
-        active_extra_rooms = all_day_additions + saturday_additions
+        # Rule: Allow C21 for Monday slots
+        monday_additions = ["C21"] if day.upper() == "MONDAY" else []
+        
+        active_extra_rooms = all_day_additions + saturday_additions + monday_additions
         
         candidate_pool = preferred + active_extra_rooms + [
             r for r in theory_rooms if r not in preferred and r not in active_extra_rooms
@@ -526,7 +530,9 @@ def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Di
                 r = x.iloc[0]
                 subj = clean(r["Subject"]) or "—"
                 fac = faculty_display(r["Faculty"], faculty_map)
+                room = clean(r["Proposed Room"])
                 fac_str = f"({fac})" if fac else ""
+                room_str = f"[{room}]" if room else ""
                 
                 theme_class = get_subject_color_theme(subj)
 
@@ -535,11 +541,12 @@ def render_html_timetable(result: pd.DataFrame, class_name: str, faculty_map: Di
                     <div class="tt-card {theme_class}">
                         <div class="tt-subject">{subj}</div>
                         <div class="tt-faculty">{fac_str}</div>
+                        <div class="tt-room">{room_str}</div>
                     </div>
                 </td>
                 '''
         html += '</tr>'
-    html += 'tbody></table>'
+    html += '</tbody></table>'
     
     st.markdown(html, unsafe_allow_html=True)
 
@@ -555,9 +562,6 @@ with st.sidebar:
     if st.button("🔄 Refresh Data", use_container_width=True):
         fetch_table.clear()
         st.rerun()
-    st.markdown("---")
-    st.markdown("**System Details**")
-    st.text("Special Activity Rooms:\nB41 & B42 (Makers, Lib, News)")
 
 try:
     with st.spinner("Connecting to Supabase..."):
@@ -594,11 +598,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 classes = sorted(timetable["Class"].unique().tolist())
 selected_class = st.selectbox("📌 Select Class / Section", classes)
 
-# Class Coordinator Details
 coord_info = coordinator_map.get(norm(selected_class))
 if coord_info:
     st.info(f"👤 **Class Coordinator:** {coord_info['name']} &nbsp;|&nbsp; 📱 **Mobile:** {coord_info['mobile']}")
 
-# Render Visual Card Timetable Grid
 st.subheader(f"📅 Schedule – {selected_class}")
 render_html_timetable(proposed, selected_class, faculty_map)
