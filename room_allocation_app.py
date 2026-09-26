@@ -343,11 +343,11 @@ def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
     return {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
 
 
-# Faculty codes and class-coordinator names are optional lookups — if the
-# tables don't exist yet, the app keeps working exactly as before and just
-# shows the raw faculty code, instead of crashing.
+# Faculty names and class-coordinator info both live in the faculty table:
+# a faculty_id/name pair, plus a flag for whether that person coordinates a
+# class, which class, and their mobile number. Optional — if the table or
+# these columns aren't there, the app keeps working and just shows codes.
 FACULTY_TABLE_CANDIDATES = ["faculty", "faculty_master", "teachers", "staff"]
-COORDINATOR_TABLE_CANDIDATES = ["class_coordinators", "coordinators", "class_coordinator"]
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -358,28 +358,46 @@ def fetch_table_optional(table_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_faculty_map() -> Tuple[Dict[str, str], str]:
+def load_faculty_and_coordinators() -> Tuple[Dict[str, str], str, Dict[str, str]]:
     for t in FACULTY_TABLE_CANDIDATES:
         df = fetch_table_optional(t)
         if df.empty:
             continue
-        id_col = find_col(df, "faculty_id", "id", "code", "faculty_code")
         name_col = find_col(df, "faculty_name", "name", "full_name")
-        if id_col and name_col:
-            return {norm(r[id_col]): clean(r[name_col]) for _, r in df.iterrows()}, t
-    return {}, ""
-
-
-def load_coordinator_map() -> Tuple[Dict[str, str], str]:
-    for t in COORDINATOR_TABLE_CANDIDATES:
-        df = fetch_table_optional(t)
-        if df.empty:
+        if not name_col:
             continue
-        class_col = find_col(df, "class_id", "class")
-        name_col = find_col(df, "coordinator_name", "coordinator", "name", "faculty_name")
-        if class_col and name_col:
-            return {norm(r[class_col]): clean(r[name_col]) for _, r in df.iterrows()}, t
-    return {}, ""
+
+        id_col = find_col(df, "faculty_id", "id", "code", "faculty_code", "emp_id", "employee_id")
+        faculty_map = (
+            {norm(r[id_col]): clean(r[name_col]) for _, r in df.iterrows()} if id_col else {}
+        )
+
+        coord_flag_col = find_col(df, "coordinated", "is_coordinator", "coordinator")
+        coord_class_col = find_col(
+            df, "coordinated_to", "coordinated to", "coordinates", "coordinator_for", "class_coordinated"
+        )
+        mobile_col = find_col(df, "mobile_number", "mobile number", "mobile", "phone", "phone_number", "contact_number")
+
+        coordinator_map: Dict[str, str] = {}
+        if coord_class_col:
+            for _, r in df.iterrows():
+                cls_val = clean(r[coord_class_col])
+                if not cls_val:
+                    continue
+                if coord_flag_col:
+                    flag = norm(r[coord_flag_col])
+                    if flag in ("", "NO", "N", "0", "FALSE"):
+                        continue
+                label = clean(r[name_col])
+                if mobile_col:
+                    mob = clean(r[mobile_col])
+                    if mob:
+                        label += f" ({mob})"
+                coordinator_map[norm(cls_val)] = label
+
+        if faculty_map or coordinator_map:
+            return faculty_map, t, coordinator_map
+    return {}, "", {}
 
 
 def shift_block(period: int) -> str:
@@ -1161,8 +1179,7 @@ if timetable.empty:
     st.stop()
 
 # Optional lookups — never fatal if the tables don't exist.
-faculty_map, faculty_table_used = load_faculty_map()
-coordinator_map, coordinator_table_used = load_coordinator_map()
+faculty_map, faculty_table_used, coordinator_map = load_faculty_and_coordinators()
 
 if faculty_map:
     timetable["Faculty"] = timetable["Faculty"].map(
@@ -1179,11 +1196,12 @@ with st.sidebar:
             "Faculty codes are shown as-is — tell me your table/column names and I'll wire it up."
         )
     if coordinator_map:
-        st.write(f"✅ Class coordinators loaded from `{coordinator_table_used}` ({len(coordinator_map)} entries).")
+        st.write(f"✅ Class coordinators loaded from `{faculty_table_used}` ({len(coordinator_map)} entries).")
     else:
         st.write(
-            "⚠️ No class-coordinator table found (tried: class_coordinators, coordinators, "
-            "class_coordinator). Tell me your table/column names and I'll wire it up."
+            "⚠️ No coordinator info found in the faculty table (tried columns: coordinated, "
+            "coordinated_to, mobile_number and close variants). Tell me the exact column names "
+            "and I'll wire it up."
         )
 
 # ----------------------------------------------------------
