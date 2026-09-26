@@ -343,6 +343,45 @@ def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
     return {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
 
 
+# Faculty codes and class-coordinator names are optional lookups — if the
+# tables don't exist yet, the app keeps working exactly as before and just
+# shows the raw faculty code, instead of crashing.
+FACULTY_TABLE_CANDIDATES = ["faculty", "faculty_master", "teachers", "staff"]
+COORDINATOR_TABLE_CANDIDATES = ["class_coordinators", "coordinators", "class_coordinator"]
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_table_optional(table_name: str) -> pd.DataFrame:
+    try:
+        return fetch_table(table_name)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_faculty_map() -> Tuple[Dict[str, str], str]:
+    for t in FACULTY_TABLE_CANDIDATES:
+        df = fetch_table_optional(t)
+        if df.empty:
+            continue
+        id_col = find_col(df, "faculty_id", "id", "code", "faculty_code")
+        name_col = find_col(df, "faculty_name", "name", "full_name")
+        if id_col and name_col:
+            return {norm(r[id_col]): clean(r[name_col]) for _, r in df.iterrows()}, t
+    return {}, ""
+
+
+def load_coordinator_map() -> Tuple[Dict[str, str], str]:
+    for t in COORDINATOR_TABLE_CANDIDATES:
+        df = fetch_table_optional(t)
+        if df.empty:
+            continue
+        class_col = find_col(df, "class_id", "class")
+        name_col = find_col(df, "coordinator_name", "coordinator", "name", "faculty_name")
+        if class_col and name_col:
+            return {norm(r[class_col]): clean(r[name_col]) for _, r in df.iterrows()}, t
+    return {}, ""
+
+
 def shift_block(period: int) -> str:
     return SHIFT_BLOCKS[int(period)]
 
@@ -508,7 +547,6 @@ def suggestion_score(
     proposed: List[Dict[str, Any]],
     theory_rooms: List[str],
     room_type: Dict[str, str],
-    preferred_rooms: List[str] | None = None,
 ) -> int:
     rkey = norm(room)
     score = 0
@@ -518,12 +556,6 @@ def suggestion_score(
         score += 50000
     if any(rkey == norm(x) for x in same_day_rooms):
         score += 15000
-    # Room-group policy: a class in a named group is nudged toward its
-    # assigned room pool whenever one of those rooms is actually free.
-    # It never overrides same-day/previous-room continuity above, and it
-    # never bypasses the conflict check the caller already applied.
-    if preferred_rooms and any(rkey == norm(p) for p in preferred_rooms):
-        score += 20000
     if room in theory_rooms:
         score += 5000
     usage_hint = sum(
@@ -728,32 +760,42 @@ def generate_semi_auto(
             continue
 
         # Automatic suggestions: find a single room free across the entire block.
-        candidates = []
-        for idx, room in enumerate(candidate_base):
-            rkey = norm(room)
-            conflict = False
-            for p in periods:
-                if rkey in {norm(x) for x in occupancy[slot_key(day, p)]}:
-                    conflict = True
-                    break
-            if conflict:
-                continue
+        # Room-group policy: search the class's assigned pool FIRST — this is a
+        # hard preference, not a scoring nudge, so a class only ever leaves its
+        # pool when every room in it is genuinely occupied for the whole block.
+        def score_pool(pool: List[str]) -> List[Tuple[int, str]]:
+            found = []
+            for idx, room in enumerate(pool):
+                rkey = norm(room)
+                conflict = any(
+                    rkey in {norm(x) for x in occupancy[slot_key(day, p)]}
+                    for p in periods
+                )
+                if conflict:
+                    continue
+                s = suggestion_score(
+                    room,
+                    cls,
+                    day,
+                    periods,
+                    old_common,
+                    last_room_for_class_day.get((cls, day), ""),
+                    same_class_day_rooms[(cls, day)],
+                    proposed,
+                    theory_rooms,
+                    room_type,
+                )
+                s -= idx
+                found.append((s, room))
+            return found
 
-            score = suggestion_score(
-                room,
-                cls,
-                day,
-                periods,
-                old_common,
-                last_room_for_class_day.get((cls, day), ""),
-                same_class_day_rooms[(cls, day)],
-                proposed,
-                theory_rooms,
-                room_type,
-                preferred_rooms,
-            )
-            score -= idx
-            candidates.append((score, room))
+        candidates: List[Tuple[int, str]] = []
+        if preferred_rooms:
+            preferred_set = {norm(p) for p in preferred_rooms}
+            group_pool = [r for r in candidate_base if norm(r) in preferred_set]
+            candidates = score_pool(group_pool)
+        if not candidates:
+            candidates = score_pool(candidate_base)
 
         if not candidates:
             for x in group:
@@ -1118,6 +1160,32 @@ if timetable.empty:
     st.warning("No timetable rows were found in the Supabase 'timetable' table.")
     st.stop()
 
+# Optional lookups — never fatal if the tables don't exist.
+faculty_map, faculty_table_used = load_faculty_map()
+coordinator_map, coordinator_table_used = load_coordinator_map()
+
+if faculty_map:
+    timetable["Faculty"] = timetable["Faculty"].map(
+        lambda code: faculty_map.get(norm(code), code) if code else code
+    )
+
+with st.sidebar:
+    st.markdown("### Faculty & coordinator lookup")
+    if faculty_map:
+        st.write(f"✅ Faculty names loaded from `{faculty_table_used}` ({len(faculty_map)} entries).")
+    else:
+        st.write(
+            "⚠️ No faculty-name table found (tried: faculty, faculty_master, teachers, staff). "
+            "Faculty codes are shown as-is — tell me your table/column names and I'll wire it up."
+        )
+    if coordinator_map:
+        st.write(f"✅ Class coordinators loaded from `{coordinator_table_used}` ({len(coordinator_map)} entries).")
+    else:
+        st.write(
+            "⚠️ No class-coordinator table found (tried: class_coordinators, coordinators, "
+            "class_coordinator). Tell me your table/column names and I'll wire it up."
+        )
+
 # ----------------------------------------------------------
 # Generate current suggestions
 # ----------------------------------------------------------
@@ -1276,6 +1344,7 @@ with tabs[2]:
     tv_class = st.selectbox(
         "Class", sorted(timetable["Class"].unique().tolist()), key="tv_class"
     )
+    st.markdown(f"**Class coordinator:** {coordinator_map.get(norm(tv_class), 'Not available')}")
 
     st.markdown(render_class_grid(proposed, tv_class), unsafe_allow_html=True)
 
