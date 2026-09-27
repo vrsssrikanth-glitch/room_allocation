@@ -33,6 +33,20 @@ from supabase import Client, create_client
 #   Every other class, and any overflow once a group's rooms
 #   are all taken, is allocated from whatever is available —
 #   exactly as before.
+#
+# Ground / lab-overflow policy (added — automatic suggester only):
+#   - GROUND is reserved for sports subjects. It is never offered
+#     to a theory class, including as overflow.
+#   - Theory classes may only overflow into lab-type rooms via
+#     B27, B37 and C21. No other lab-type room is ever offered
+#     to a theory class by the automatic suggester.
+#   - PHY and LAC (and any subject code that starts with either
+#     token, e.g. "PHY-1") are never placed in ANY lab-type room,
+#     not even B27 / B37 / C21. If no theory room is free for
+#     their block they are reported as a hurdle instead.
+#   These rules only affect the automatic suggester. The Manual
+#   Assignment tab still lists every physical room, in case a
+#   coordinator needs to override deliberately.
 
 
 st.set_page_config(
@@ -75,6 +89,19 @@ ROOM_GROUP_RULES: List[Tuple[List[str], List[str]]] = [
     (["CSC", "CSD", "IT", "EEE1", "EEE2"], ["B34", "B35", "B36", "A38"]),
     (["CAI-1", "CAI-2", "CSM-1", "CSM-2", "CSM-3"], ["A41", "A42", "A45", "A46", "A47"]),
 ]
+
+# Ground is reserved for sports subjects only — never eligible for theory,
+# not even as fallback overflow. The automatic suggester never offers it.
+GROUND_ROOM = "GROUND"
+
+# Theory may overflow into lab-type rooms, but ONLY these three rooms.
+# No other lab-type room is ever offered to a theory class automatically.
+LAB_OVERFLOW_ROOMS_FOR_THEORY = {"B27", "B37", "C21"}
+
+# These theory subjects must never land in a lab-type room, including the
+# three overflow rooms above. Matched as exact code or prefix, so "PHY-1"
+# and "LAC-A" are still caught.
+NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 
 # ----------------------------------------------------------
@@ -339,6 +366,14 @@ def preferred_rooms_for_class(cls: str) -> List[str]:
     return []
 
 
+def subject_forbids_labs(subject: str) -> bool:
+    """PHY and LAC (and prefixed variants like 'PHY-1') must never be placed
+    in any lab-type room — including the B27 / B37 / C21 overflow rooms that
+    other theory subjects are allowed to use."""
+    s = norm(subject)
+    return any(s == tok or s.startswith(tok) for tok in NO_LAB_SUBJECTS)
+
+
 def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
     return {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
 
@@ -442,14 +477,28 @@ def base_room_data(rooms: pd.DataFrame):
     room_records = rooms.to_dict("records")
     all_rooms = [clean(r["Room_ID"]) for r in room_records if clean(r["Room_ID"])]
     room_type = {norm(r["Room_ID"]): clean(r["Type"]) for r in room_records}
+
     theory_rooms = [
         r for r in all_rooms if room_is_theory_type(room_type.get(norm(r), ""))
     ]
-    other_rooms = [r for r in all_rooms if r not in theory_rooms]
+    # Ground is sports-only — strip it out of the theory pool entirely so it
+    # is never offered to a theory class by the automatic suggester.
+    theory_rooms = [r for r in theory_rooms if norm(r) != GROUND_ROOM]
+
+    other_rooms = [
+        r for r in all_rooms
+        if r not in theory_rooms and norm(r) != GROUND_ROOM
+    ]
     if not theory_rooms:
-        theory_rooms = all_rooms[:]
+        theory_rooms = [r for r in all_rooms if norm(r) != GROUND_ROOM]
+
+    # Theory can only overflow into lab-type rooms via the three approved
+    # rooms — no other lab-type room is ever offered to a theory class.
+    lab_overflow_rooms = [
+        r for r in other_rooms if norm(r) in LAB_OVERFLOW_ROOMS_FOR_THEORY
+    ]
     candidate_base = theory_rooms + [
-        r for r in other_rooms if norm(r) not in {norm(x) for x in theory_rooms}
+        r for r in lab_overflow_rooms if norm(r) not in {norm(x) for x in theory_rooms}
     ]
     return all_rooms, room_type, theory_rooms, candidate_base
 
@@ -778,6 +827,17 @@ def generate_semi_auto(
             continue
 
         # Automatic suggestions: find a single room free across the entire block.
+        # Room pool for this block:
+        #   - PHY/LAC subjects: theory rooms only (never a lab, not even the
+        #     B27/B37/C21 overflow rooms).
+        #   - everything else: theory rooms + the B27/B37/C21 lab overflow
+        #     rooms (candidate_base already excludes GROUND and every other
+        #     lab-type room).
+        if any(subject_forbids_labs(x["Subject"]) for x in group):
+            block_pool = theory_rooms
+        else:
+            block_pool = candidate_base
+
         # Room-group policy: search the class's assigned pool FIRST — this is a
         # hard preference, not a scoring nudge, so a class only ever leaves its
         # pool when every room in it is genuinely occupied for the whole block.
@@ -810,10 +870,10 @@ def generate_semi_auto(
         candidates: List[Tuple[int, str]] = []
         if preferred_rooms:
             preferred_set = {norm(p) for p in preferred_rooms}
-            group_pool = [r for r in candidate_base if norm(r) in preferred_set]
+            group_pool = [r for r in block_pool if norm(r) in preferred_set]
             candidates = score_pool(group_pool)
         if not candidates:
-            candidates = score_pool(candidate_base)
+            candidates = score_pool(block_pool)
 
         if not candidates:
             for x in group:
@@ -947,8 +1007,8 @@ def validate_manual_assignment(
     if not room:
         return False, "No room selected."
 
-    all_rooms = {norm(x) for x in rooms["Room_ID"]}
-    if norm(room) not in all_rooms:
+    all_rooms_map = {norm(x): x for x in rooms["Room_ID"]}
+    if norm(room) not in all_rooms_map:
         return False, f"{room} is not present in the rooms table."
 
     rows = timetable[
@@ -966,6 +1026,21 @@ def validate_manual_assignment(
         fixed = lab_map.get(norm(row["Subject"]))
         if fixed and norm(fixed) != norm(room):
             return False, f"This is a fixed laboratory subject. Required room: {fixed}."
+    else:
+        # Theory subject — enforce the same Ground / lab-overflow rules that
+        # the automatic suggester follows, so a manual override can't
+        # silently violate them.
+        room_type_map = {norm(r): t for r, t in zip(rooms["Room_ID"], rooms["Type"])}
+        if norm(room) == GROUND_ROOM:
+            return False, "Ground is reserved for sports subjects and cannot be used for theory."
+        if room_is_lab_type(room_type_map.get(norm(room), "")):
+            if subject_forbids_labs(row["Subject"]):
+                return False, f"{row['Subject']} must not be placed in a lab room, even {room}."
+            if norm(room) not in LAB_OVERFLOW_ROOMS_FOR_THEORY:
+                return False, (
+                    f"{room} is a lab-type room. Theory can only overflow into "
+                    f"{', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))}."
+                )
 
     block = shift_block(period)
     periods = [
@@ -1153,7 +1228,7 @@ with st.sidebar:
     st.markdown("### Allocation logic")
     st.write("🔵 Labs use the fixed room in `labs`.")
     st.write("🟢 Theory rooms are preferred.")
-    st.write("🟡 Lab-type rooms are fallback capacity.")
+    st.write("🟡 Lab-type rooms are fallback capacity — theory only, via B27/B37/C21.")
     st.write("🔴 Conflicts are highlighted.")
     st.write("🟣 Locked manual assignments are preserved.")
 
@@ -1161,6 +1236,11 @@ with st.sidebar:
     st.write("🏢 CSC · CSD · IT · EEE1 · EEE2 → B34, B35, B36, A38 (when free)")
     st.write("🏢 CAI-1 · CAI-2 · CSM-1 · CSM-2 · CSM-3 → A41, A42, A45, A46, A47 (when free)")
     st.write("↩️ Every other class, and any overflow, uses the next best available room.")
+
+    st.markdown("### Ground & lab-overflow policy")
+    st.write("🏟️ Ground is reserved for sports subjects — never offered to theory.")
+    st.write("🧪 Theory may overflow into labs only via B27, B37, C21.")
+    st.write("🚫 PHY and LAC are never placed in any lab room, including B27/B37/C21.")
 
 try:
     with st.spinner("Reading timetable, rooms and lab information from Supabase..."):
@@ -1311,7 +1391,8 @@ with tabs[0]:
         "A class gets one room across P1–P2, one room across P3–P4, and one room across P5–P7. "
         "Manual selections are validated against the same rule. Named class groups are nudged "
         "toward their assigned room pool whenever one of those rooms is free; otherwise the "
-        "next best available room is used."
+        "next best available room is used. Ground is reserved for sports subjects only, theory "
+        "may overflow into labs only via B27/B37/C21, and PHY/LAC never use a lab room at all."
     )
 
 # ----------------------------------------------------------
@@ -1410,7 +1491,8 @@ with tabs[3]:
     st.subheader("🛠️ Manual room assignment")
     st.caption(
         "Choose a class, day and period. The application suggests vacant rooms and checks "
-        "the complete movement block before allowing the assignment."
+        "the complete movement block before allowing the assignment. Ground, lab-overflow "
+        "and PHY/LAC restrictions are enforced here too."
     )
 
     m1, m2, m3 = st.columns(3)
@@ -1478,6 +1560,15 @@ with tabs[3]:
                 f"Room-group policy for {manual_class}: {', '.join(preferred_for_class)} "
                 "(listed first above, when free)."
             )
+
+        if not is_lab(r["Subject"], build_lab_map(labs)):
+            if subject_forbids_labs(r["Subject"]):
+                st.caption(f"⚠️ {r['Subject']} must not be assigned to any lab room, including B27/B37/C21.")
+            else:
+                st.caption(
+                    "ℹ️ This is a theory subject — Ground is unavailable, and lab-type rooms "
+                    f"are only usable via {', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))}."
+                )
 
         if available:
             st.success(
@@ -1856,5 +1947,6 @@ st.markdown("---")
 st.caption(
     "Semi-Automatic Room Allocation • Supabase read-only analysis • "
     "P1–P2 / P3–P4 / P5–P7 movement constraints preserved • "
-    "Room-group policy applied for CSC/CSD/IT/EEE1/EEE2 and CAI/CSM classes"
+    "Room-group policy applied for CSC/CSD/IT/EEE1/EEE2 and CAI/CSM classes • "
+    "Ground sports-only, B27/B37/C21 lab overflow for theory, PHY/LAC never in labs"
 )
