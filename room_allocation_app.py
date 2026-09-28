@@ -95,7 +95,7 @@ LAB_OVERFLOW_SUBJECTS = {"CE", "AI_T", "CP", "A_T"}
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 # Default pinned rooms for fixed subjects
-FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37"}
+FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37"}
 
 # Seminar hall: shared by up to 4 classes at once for DTI of ECE1-4 and CSE1-4.
 SEMINAR_KEYWORD = "Seminar hall"
