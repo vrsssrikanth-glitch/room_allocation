@@ -30,7 +30,9 @@ from supabase import Client, create_client
 #   CAI-1, CAI-2, CSM-1, CSM-2, CSM-3 -> A41, A42, A45, A46, A47
 #
 # Special rules:
-#   - AIT(B37) / AIT is pinned to B37.
+#   - Tuesday & Wednesday P1-P2, P3-P4:
+#       * AIT(B37) -> pinned to B37
+#       * Remaining AIT -> allocated to C21
 #   - Seminar hall takes up to 4 classes at once, for DTI of
 #     ECE-1..4 and CSE-1..4.
 #   - GROUND is reserved for sports subjects.
@@ -92,7 +94,7 @@ LAB_OVERFLOW_SUBJECTS = {"CE", "AI_T", "CP", "A_T"}
 # Never placed in any lab-type room, not even B27/B37/C21.
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
-# Subjects pinned to one room regardless of the labs table.
+# Default pinned rooms for fixed subjects
 FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37"}
 
 # Seminar hall: shared by up to 4 classes at once for DTI of ECE1-4 and CSE1-4.
@@ -158,8 +160,7 @@ st.markdown(
         padding: 13px;
         margin: 5px 0;
         border-radius: 12px;
-        border: 1px solid #fde68a;
-        background: #fffbeb;
+        border: 1px solid #fffbeb;
     }
     .small-muted {
         color: #64748b;
@@ -407,19 +408,31 @@ def find_seminar_room(all_rooms) -> str:
 
 def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
     m = {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
-    for subj, room in FIXED_SUBJECT_ROOMS.items():   # AIT -> B37
+    for subj, room in FIXED_SUBJECT_ROOMS.items():
         m[norm(subj)] = room
     return m
 
 
 def is_fixed_row(subject: str, cls: str, lab_map: Dict[str, str]) -> bool:
-    return is_lab(subject, lab_map) or is_seminar_row(subject, cls) or norm(subject) in FIXED_SUBJECT_ROOMS
+    return is_lab(subject, lab_map) or is_seminar_row(subject, cls) or norm(subject) in FIXED_SUBJECT_ROOMS or norm(subject).startswith("AIT")
 
 
-def fixed_room_for_row(subject, cls, lab_map, all_rooms) -> str:
+def fixed_room_for_row(subject: str, cls: str, day: str, period: int, lab_map: Dict[str, str], all_rooms: List[str]) -> str:
     if is_seminar_row(subject, cls):
         return find_seminar_room(all_rooms)
-    return lab_map.get(norm(subject), "")
+    
+    # Specific rule for Tuesday and Wednesday P1-P2, P3-P4 for AIT subjects
+    s_norm = norm(subject)
+    d_norm = norm(day)
+    p_val = int(period)
+    
+    if d_norm in ["TUESDAY", "WEDNESDAY"] and p_val in [1, 2, 3, 4]:
+        if "AIT(B37)" in s_norm or s_norm == "AIT(B37)":
+            return "B37"
+        elif "AIT" in s_norm:
+            return "C21"
+
+    return lab_map.get(s_norm, "")
 
 
 # Faculty names and class-coordinator info
@@ -610,7 +623,7 @@ def build_fixed_occupancy(
             continue
 
         seminar = is_seminar_row(row["Subject"], row["Class"])
-        mapped = fixed_room_for_row(row["Subject"], row["Class"], lab_map, all_rooms)
+        mapped = fixed_room_for_row(row["Subject"], row["Class"], row["Day"], row["Period"], lab_map, all_rooms)
 
         if not mapped:
             if seminar:
@@ -1145,7 +1158,7 @@ def validate_manual_assignment(
     lab_map = build_lab_map(labs)
 
     if is_fixed_row(subject, cls, lab_map):
-        fixed = fixed_room_for_row(subject, cls, lab_map, room_ids)
+        fixed = fixed_room_for_row(subject, cls, day, period, lab_map, room_ids)
         return False, (
             f"{subject} is a fixed subject placed in {fixed or 'its fixed room'} "
             "automatically; it cannot be reassigned manually."
@@ -1375,7 +1388,7 @@ with st.sidebar:
     st.write("🧪 B27/B37/C21: allocate for single-hour CP, AI_T, and CE theory.")
     st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at once).")
     st.write("📚 Library at P4/P7 → allocates to B41/B42 only.")
-    st.write("📌 AIT / AIT(B37) → B37 always.")
+    st.write("📌 Tuesday & Wednesday P1–P2, P3–P4: AIT(B37) → B37, remaining AIT → C21.")
 
 try:
     with st.spinner("Reading timetable, rooms and lab information from Supabase..."):
@@ -1519,7 +1532,8 @@ with tabs[0]:
     st.markdown("### 🧭 Rule reminder")
     st.info(
         "A class gets one room across P1–P2, one across P3–P4 and one across P5–P7. "
-        "Named class groups are nudged toward their assigned room pool. AIT/AIT(B37) is always in B37. "
+        "Named class groups are nudged toward their assigned room pool. "
+        "Tuesday & Wednesday P1–P2 & P3–P4: AIT(B37) uses B37 and remaining AIT uses C21. "
         "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Library at P4/P7 "
         "allocates B41/B42 only. PHY and LAC allocate theory rooms only. B27/B37/C21 can allocate "
         "for single-hour CP, AI_T, and CE theory. Ground is for sports only."
@@ -2037,6 +2051,6 @@ with tabs[8]:
 st.markdown("---")
 st.caption(
     "Semi-Automatic Room Allocation • "
-    "AIT→B37 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • Library P4/P7→B41/B42 • "
-    "PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
+    "Tue & Wed P1-P4: AIT(B37)→B37 & remaining AIT→C21 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • "
+    "Library P4/P7→B41/B42 • PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
 )
