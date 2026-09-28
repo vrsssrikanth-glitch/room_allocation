@@ -87,13 +87,13 @@ GROUND_ROOM = "GROUND"
 # Theory rooms that are lab-type. ONLY single-hour theory of the subjects
 # in LAB_OVERFLOW_SUBJECTS may use them.
 LAB_OVERFLOW_ROOMS_FOR_THEORY = {"B27", "B37", "C21"}
-LAB_OVERFLOW_SUBJECTS = {"CE", "AT_I", "CP"}
+LAB_OVERFLOW_SUBJECTS = {"CE", "A_T", "CP"}
 
 # Never placed in any lab-type room, not even B27/B37/C21.
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 # Subjects pinned to one room regardless of the labs table.
-FIXED_SUBJECT_ROOMS = {"AIT": "B37"}
+FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37"}
 
 # Seminar hall: shared by several classes at once. The room is found in the
 # rooms table by name (any Room_ID containing "SEMINAR").
