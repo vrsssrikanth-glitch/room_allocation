@@ -884,7 +884,7 @@ def generate_semi_auto(
             room = manual_room_for(manual_key(day, p, cls))
             if room:
                 manual_rooms.append(room)
-        if manual_rooms and len({norm(x)} for x in manual_rooms) == 1:
+        if manual_rooms and len({norm(x) for x in manual_rooms}) == 1:
             last_room_for_class_day[(cls, day)] = manual_rooms[0]
             same_class_day_rooms[(cls, day)].add(manual_rooms[0])
 
