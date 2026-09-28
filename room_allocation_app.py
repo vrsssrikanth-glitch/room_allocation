@@ -30,14 +30,14 @@ from supabase import Client, create_client
 #   CAI-1, CAI-2, CSM-1, CSM-2, CSM-3 -> A41, A42, A45, A46, A47
 #
 # Special rules:
-#   - AIT is pinned to B37.
+#   - AIT(B37) / AIT is pinned to B37.
 #   - Seminar hall takes up to 4 classes at once, for DTI of
-#     ECE-1..4 and CSE-1..4 only.
+#     ECE-1..4 and CSE-1..4.
 #   - GROUND is reserved for sports subjects.
-#   - PHY and LAC use theory rooms only, never a lab-type room.
-#   - B27, B37, C21 (lab-type) may be used only for SINGLE-HOUR
-#     theory of CE, AT_I and CP.
-#   - Library at P4 and P7 uses B41 / B42 and never a theory room.
+#   - PHY and LAC allocate only theory rooms (never lab-type rooms).
+#   - B27, B37, C21 (lab-type) may be used for SINGLE-HOUR
+#     theory of CP, AI_T, and CE.
+#   - Library at P4 and P7 allocates to B41 and B42 and never theory rooms.
 
 
 st.set_page_config(
@@ -87,23 +87,25 @@ GROUND_ROOM = "GROUND"
 # Theory rooms that are lab-type. ONLY single-hour theory of the subjects
 # in LAB_OVERFLOW_SUBJECTS may use them.
 LAB_OVERFLOW_ROOMS_FOR_THEORY = {"B27", "B37", "C21"}
-LAB_OVERFLOW_SUBJECTS = {"CE", "A_T", "CP"}
+LAB_OVERFLOW_SUBJECTS = {"CE", "AI_T", "CP", "A_T"}
 
 # Never placed in any lab-type room, not even B27/B37/C21.
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 # Subjects pinned to one room regardless of the labs table.
-FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37"}
+FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37"}
 
-# Seminar hall: shared by several classes at once. The room is found in the
-# rooms table by name (any Room_ID containing "SEMINAR").
+# Seminar hall: shared by up to 4 classes at once for DTI of ECE1-4 and CSE1-4.
 SEMINAR_KEYWORD = "Seminar hall"
 SEMINAR_CAPACITY = 4
 SEMINAR_SUBJECTS = {
-    "DTI": ["ECE-1", "ECE-2", "ECE-3", "ECE-4", "CSE-1", "CSE-2", "CSE-3", "CSE-4"],
+    "DTI": [
+        "ECE-1", "ECE-2", "ECE-3", "ECE-4", "ECE1", "ECE2", "ECE3", "ECE4",
+        "CSE-1", "CSE-2", "CSE-3", "CSE-4", "CSE1", "CSE2", "CSE3", "CSE4"
+    ],
 }
 
-# Library at P4 / P7 uses these rooms, never a theory room.
+# Library at P4 / P7 allocates to B41 / B42, never a theory room.
 LIBRARY_TOKEN = "LIB"          # subject starts with this (LIB, LIBRARY ...)
 LIBRARY_PERIODS = {4, 7}
 LIBRARY_ROOMS = ["B41", "B42"]
@@ -358,9 +360,7 @@ def room_is_theory_type(room_type: str) -> bool:
 
 
 def preferred_rooms_for_class(cls: str) -> List[str]:
-    """Room-group policy lookup. Exact match first, then prefix match, so a
-    variant like 'CSC-A' still matches the 'CSC' rule. Returns [] for any
-    class not covered."""
+    """Room-group policy lookup. Exact match first, then prefix match."""
     key = norm(cls)
     for class_tokens, room_list in ROOM_GROUP_RULES:
         for token in class_tokens:
@@ -371,15 +371,14 @@ def preferred_rooms_for_class(cls: str) -> List[str]:
 
 
 def subject_forbids_labs(subject: str) -> bool:
-    """PHY and LAC (and prefixed variants like 'PHY-1') must never be placed
-    in any lab-type room, including B27 / B37 / C21."""
+    """PHY and LAC must never be placed in any lab-type room, including B27/B37/C21."""
     s = norm(subject)
     return any(s == tok or s.startswith(tok) for tok in NO_LAB_SUBJECTS)
 
 
 def subject_matches(subject: str, tokens) -> bool:
     s = norm(subject)
-    return any(s == t or s.startswith(t + "-") or s.startswith(t + " ") for t in tokens)
+    return any(s == t or s.startswith(t + "-") or s.startswith(t + " ") or s.startswith(t + "_") for t in tokens)
 
 
 def subject_may_use_lab_overflow(subject: str) -> bool:
@@ -389,7 +388,7 @@ def subject_may_use_lab_overflow(subject: str) -> bool:
 def is_seminar_row(subject: str, cls: str) -> bool:
     s, c = norm(subject), norm(cls)
     for code, classes in SEMINAR_SUBJECTS.items():
-        if s == code or s.startswith(code + "-"):
+        if s == code or s.startswith(code + "-") or s.startswith(code + "_"):
             if any(c == norm(x) or c.startswith(norm(x)) for x in classes):
                 return True
     return False
@@ -401,7 +400,7 @@ def is_library_slot(subject: str, period: int) -> bool:
 
 def find_seminar_room(all_rooms) -> str:
     for r in all_rooms:
-        if SEMINAR_KEYWORD in norm(r):
+        if SEMINAR_KEYWORD.lower() in norm(r).lower() or "seminar" in norm(r).lower():
             return clean(r)
     return ""
 
@@ -414,7 +413,7 @@ def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
 
 
 def is_fixed_row(subject: str, cls: str, lab_map: Dict[str, str]) -> bool:
-    return is_lab(subject, lab_map) or is_seminar_row(subject, cls)
+    return is_lab(subject, lab_map) or is_seminar_row(subject, cls) or norm(subject) in FIXED_SUBJECT_ROOMS
 
 
 def fixed_room_for_row(subject, cls, lab_map, all_rooms) -> str:
@@ -423,10 +422,7 @@ def fixed_room_for_row(subject, cls, lab_map, all_rooms) -> str:
     return lab_map.get(norm(subject), "")
 
 
-# Faculty names and class-coordinator info both live in the faculty table:
-# a faculty_id/name pair, plus a flag for whether that person coordinates a
-# class, which class, and their mobile number. Optional — if the table or
-# these columns aren't there, the app keeps working and just shows codes.
+# Faculty names and class-coordinator info
 FACULTY_TABLE_CANDIDATES = ["faculty", "faculty_master", "teachers", "staff"]
 
 
@@ -550,14 +546,13 @@ def base_room_data(rooms: pd.DataFrame):
     all_rooms = [clean(r["Room_ID"]) for r in room_records if clean(r["Room_ID"])]
     room_type = {norm(r["Room_ID"]): clean(r["Type"]) for r in room_records}
 
-    # Never part of the normal theory pool: Ground (sports) and Seminar hall (DTI).
+    # Reserved rooms
     reserved = {GROUND_ROOM}
     seminar_room = find_seminar_room(all_rooms)
     if seminar_room:
         reserved.add(norm(seminar_room))
 
-    # B27/B37/C21 are kept OUT of the theory pool; they are reachable only
-    # through the single-hour CE / AT_I / CP rule.
+    # B27/B37/C21 are kept OUT of general theory pool.
     theory_rooms = [
         r for r in all_rooms
         if room_is_theory_type(room_type.get(norm(r), ""))
@@ -622,8 +617,8 @@ def build_fixed_occupancy(
                 add_hurdle(row, "Seminar hall not found in rooms table.",
                            f"Add a room whose ID contains '{SEMINAR_KEYWORD}'.")
             else:
-                add_hurdle(row, "Lab subject detected but no lab mapping exists.",
-                           "Add the subject-room mapping to the labs table.")
+                add_hurdle(row, f"Lab/Fixed subject '{row['Subject']}' detected but no mapping exists.",
+                           "Add the subject-room mapping to the labs table or FIXED_SUBJECT_ROOMS.")
             continue
 
         if norm(mapped) not in all_keys:
@@ -636,7 +631,7 @@ def build_fixed_occupancy(
             ck = (key, norm(mapped))
             if shared_count[ck] >= SEMINAR_CAPACITY:
                 add_hurdle(row,
-                           f"Seminar hall capacity ({SEMINAR_CAPACITY} classes) exceeded.",
+                           f"Seminar hall capacity ({SEMINAR_CAPACITY} classes for DTI) exceeded.",
                            "Move one of the classes to another slot.")
                 continue
             shared_count[ck] += 1
@@ -674,10 +669,6 @@ def manual_key(day, period, cls):
 
 
 def collect_manual_occupancy():
-    """
-    Returns manual assignments by slot. Only explicitly assigned rooms
-    occupy slots. Block consistency is checked separately.
-    """
     occ = defaultdict(set)
     for (day, period, cls), room in st.session_state.manual_assignments.items():
         if room:
@@ -739,13 +730,10 @@ def generate_semi_auto(
         key=lambda s: s.map(DAYS.index) if s.name == "Day" else s,
     ).copy()
 
-    # Manual assignments have highest priority. They are validated first.
     manual_occ = collect_manual_occupancy()
     for key, rooms_for_slot in manual_occ.items():
         occupancy[key].update(rooms_for_slot)
 
-    # Theory rows: everything that is not fixed (lab / AIT / seminar) and not
-    # a library period.
     fixed_or_library = pd.Series(
         [
             is_fixed_row(s, c, lab_map) or is_library_slot(s, p)
@@ -804,7 +792,7 @@ def generate_semi_auto(
         free.sort(key=lambda r: (
             0 if norm(r) == norm(prev) else 1,
             0 if norm(r) == norm(old_room) else 1,
-            lib_pool.index(r),
+            lib_pool.index(r) if r in lib_pool else 99,
         ))
         room = free[0]
         occupancy[slot_key(day, p)].add(room)
@@ -815,7 +803,7 @@ def generate_semi_auto(
             "Reason": "",
         })
 
-    # Build theory groups, preserving the uploaded program's block constraint.
+    # Build theory groups
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for _, row in theory_rows.iterrows():
         groups[(row["Day"], row["Class"], shift_block(int(row["Period"])))].append(
@@ -835,7 +823,6 @@ def generate_semi_auto(
     last_room_for_class_day: Dict[Tuple[str, str], str] = {}
     same_class_day_rooms: Dict[Tuple[str, str], set] = defaultdict(set)
 
-    # Seed previous block information from manual assignments.
     for (day, cls, block), group in groups.items():
         block_ps = block_periods(block)
         manual_rooms = []
@@ -855,7 +842,6 @@ def generate_semi_auto(
         ]
         old_common = old_rooms[0] if old_rooms and len({norm(x) for x in old_rooms}) == 1 else ""
 
-        # Check manual assignments in this entire block.
         manual_rooms = [
             manual_room_for(manual_key(day, p, cls)) for p in periods
         ]
@@ -865,10 +851,7 @@ def generate_semi_auto(
         if manual_unique and len(manual_unique) > 1:
             for x in group:
                 p = int(x["Period"])
-                if not manual_room_for(manual_key(day, p, cls)):
-                    room = ""
-                else:
-                    room = manual_room_for(manual_key(day, p, cls))
+                room = manual_room_for(manual_key(day, p, cls))
                 proposed.append(
                     {
                         "Day": day,
@@ -899,7 +882,6 @@ def generate_semi_auto(
 
         manual_common = manual_rooms_nonempty[0] if manual_rooms_nonempty else ""
         if manual_common:
-            # Validate the selected room is free for all periods of the block.
             rkey = norm(manual_common)
             conflicting_periods = [
                 p
@@ -972,11 +954,7 @@ def generate_semi_auto(
             same_class_day_rooms[(cls, day)].add(manual_common)
             continue
 
-        # Automatic suggestions: find a single room free across the entire block.
-        # Room pool for this block:
-        #   - PHY / LAC: theory rooms only (never a lab-type room).
-        #   - single-hour CE / AT_I / CP: theory rooms + B27/B37/C21.
-        #   - everything else: theory rooms only.
+        # Automatic suggestions pool calculation
         if any(subject_forbids_labs(x["Subject"]) for x in group):
             block_pool = theory_rooms
         elif len(periods) == 1 and all(
@@ -986,7 +964,6 @@ def generate_semi_auto(
         else:
             block_pool = theory_rooms
 
-        # Room-group policy: search the class's assigned pool FIRST.
         def score_pool(pool: List[str]) -> List[Tuple[int, str]]:
             found = []
             for idx, room in enumerate(pool):
@@ -1119,7 +1096,6 @@ def vacant_rooms_for(
 
     occupied = {norm(x) for x in fixed_occ[slot_key(day, period)]}
 
-    # Include current manual assignments, but ignore the selected class itself.
     for (d, p, cls), room in st.session_state.manual_assignments.items():
         if d == day and int(p) == int(period) and cls != exclude_class and room:
             occupied.add(norm(room))
@@ -1168,7 +1144,6 @@ def validate_manual_assignment(
     subject = rows.iloc[0]["Subject"]
     lab_map = build_lab_map(labs)
 
-    # Labs, AIT and seminar subjects are fixed by rule.
     if is_fixed_row(subject, cls, lab_map):
         fixed = fixed_room_for_row(subject, cls, lab_map, room_ids)
         return False, (
@@ -1181,7 +1156,7 @@ def validate_manual_assignment(
 
     if library:
         if norm(room) not in {norm(x) for x in LIBRARY_ROOMS}:
-            return False, f"Library periods (P4/P7) must use {', '.join(LIBRARY_ROOMS)}."
+            return False, f"Library periods (P4/P7) must allocate to {', '.join(LIBRARY_ROOMS)}."
     else:
         if seminar_room and norm(room) == norm(seminar_room):
             return False, "Seminar hall is reserved for DTI (ECE/CSE 1-4)."
@@ -1195,7 +1170,7 @@ def validate_manual_assignment(
     )
     if is_lab_room and not library:
         if subject_forbids_labs(subject):
-            return False, f"{subject} must not be placed in a lab room, even {room}."
+            return False, f"{subject} must allocate only theory rooms and never any lab room, including {room}."
         if norm(room) not in LAB_OVERFLOW_ROOMS_FOR_THEORY:
             return False, (
                 f"{room} is a lab-type room. Only "
@@ -1225,8 +1200,6 @@ def validate_manual_assignment(
 
 
 def render_class_grid(proposed_df: pd.DataFrame, cls: str) -> str:
-    """Builds a plain-language day-by-period timetable grid (HTML) for one
-    class, colour-coded by the same STATUS_COLORS used everywhere else."""
     sub = proposed_df[proposed_df["Class"] == cls]
     header_cells = "".join(
         f"<th style='padding:7px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.8rem'>P{p}</th>"
@@ -1398,11 +1371,11 @@ with st.sidebar:
 
     st.markdown("### Special room rules")
     st.write("🏟️ Ground is reserved for sports subjects — never offered to theory.")
-    st.write("🚫 PHY and LAC use theory rooms only, never any lab room.")
-    st.write("🧪 B27/B37/C21: only single-hour CE, AT_I, CP theory.")
-    st.write("🏛️ Seminar hall: DTI for ECE-1..4 / CSE-1..4 (max 4 classes).")
-    st.write("📚 Library at P4/P7 → B41/B42 only.")
-    st.write("📌 AIT → B37 always.")
+    st.write("🚫 PHY and LAC allocate ONLY theory rooms, never lab rooms.")
+    st.write("🧪 B27/B37/C21: allocate for single-hour CP, AI_T, and CE theory.")
+    st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at once).")
+    st.write("📚 Library at P4/P7 → allocates to B41/B42 only.")
+    st.write("📌 AIT / AIT(B37) → B37 always.")
 
 try:
     with st.spinner("Reading timetable, rooms and lab information from Supabase..."):
@@ -1420,7 +1393,6 @@ if timetable.empty:
     st.warning("No timetable rows were found in the Supabase 'timetable' table.")
     st.stop()
 
-# Optional lookups — never fatal if the tables don't exist.
 faculty_map, faculty_table_used, coordinator_map = load_faculty_and_coordinators()
 
 if faculty_map:
@@ -1434,16 +1406,13 @@ with st.sidebar:
         st.write(f"✅ Faculty names loaded from `{faculty_table_used}` ({len(faculty_map)} entries).")
     else:
         st.write(
-            "⚠️ No faculty-name table found (tried: faculty, faculty_master, teachers, staff). "
-            "Faculty codes are shown as-is — tell me your table/column names and I'll wire it up."
+            "⚠️ No faculty-name table found (tried: faculty, faculty_master, teachers, staff)."
         )
     if coordinator_map:
         st.write(f"✅ Class coordinators loaded from `{faculty_table_used}` ({len(coordinator_map)} entries).")
     else:
         st.write(
-            "⚠️ No coordinator info found in the faculty table (tried columns: coordinated, "
-            "coordinated_to, mobile_number and close variants). Tell me the exact column names "
-            "and I'll wire it up."
+            "⚠️ No coordinator info found in the faculty table."
         )
 
 # ----------------------------------------------------------
@@ -1550,10 +1519,10 @@ with tabs[0]:
     st.markdown("### 🧭 Rule reminder")
     st.info(
         "A class gets one room across P1–P2, one across P3–P4 and one across P5–P7. "
-        "Named class groups are nudged toward their assigned room pool. AIT is always in B37. "
-        "DTI for ECE/CSE 1–4 uses the seminar hall (max 4 classes at a time). Library at P4/P7 "
-        "uses B41/B42 only. PHY and LAC use theory rooms only. B27/B37/C21 are used only for "
-        "single-hour CE, AT_I and CP theory. Ground is for sports only."
+        "Named class groups are nudged toward their assigned room pool. AIT/AIT(B37) is always in B37. "
+        "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Library at P4/P7 "
+        "allocates B41/B42 only. PHY and LAC allocate theory rooms only. B27/B37/C21 can allocate "
+        "for single-hour CP, AI_T, and CE theory. Ground is for sports only."
     )
 
 # ----------------------------------------------------------
@@ -1594,10 +1563,7 @@ with tabs[1]:
 # ----------------------------------------------------------
 with tabs[2]:
     st.subheader("🗓️ Timetable view")
-    st.caption(
-        "A day-by-period grid for one class — the same shape as a printed timetable — "
-        "built from the current suggestions and any manual overrides."
-    )
+    st.caption("A day-by-period grid for one class.")
 
     tv_class = st.selectbox(
         "Class", sorted(timetable["Class"].unique().tolist()), key="tv_class"
@@ -1648,11 +1614,7 @@ with tabs[2]:
 # ----------------------------------------------------------
 with tabs[3]:
     st.subheader("🛠️ Manual room assignment")
-    st.caption(
-        "Choose a class, day and period. The application suggests vacant rooms and checks "
-        "the complete movement block before allowing the assignment. All room rules "
-        "(Ground, seminar hall, lab rooms, library, PHY/LAC) are enforced here too."
-    )
+    st.caption("Manual overrides with validation against all system constraints.")
 
     m1, m2, m3 = st.columns(3)
     manual_class = m1.selectbox(
@@ -1693,12 +1655,10 @@ with tabs[3]:
             exclude_class=manual_class,
         )
 
-        # Existing selection
         existing = manual_room_for(
             manual_key(manual_day, manual_period, manual_class)
         )
 
-        # Room-group policy: list this class's preferred pool first.
         preferred_for_class = preferred_rooms_for_class(manual_class)
         if library_now:
             preferred_for_class = LIBRARY_ROOMS
@@ -1723,24 +1683,18 @@ with tabs[3]:
 
         if preferred_for_class:
             st.caption(
-                f"Preferred rooms for {manual_class}: {', '.join(preferred_for_class)} "
-                "(listed first above, when free)."
+                f"Preferred rooms for {manual_class}: {', '.join(preferred_for_class)}"
             )
 
         if fixed_now:
-            st.caption(
-                "📌 This is a fixed subject (lab / AIT / seminar). Its room is set "
-                "automatically and cannot be changed manually."
-            )
+            st.caption("📌 Fixed subject (lab / AIT / seminar) — set automatically.")
         elif library_now:
-            st.caption(f"📚 Library period — only {', '.join(LIBRARY_ROOMS)} are allowed.")
+            st.caption(f"📚 Library period — allocates to {', '.join(LIBRARY_ROOMS)} only.")
         elif subject_forbids_labs(r["Subject"]):
-            st.caption(f"⚠️ {r['Subject']} must not be assigned to any lab room, including B27/B37/C21.")
+            st.caption(f"⚠️ {r['Subject']} allocates only theory rooms (never lab rooms like B27/B37/C21).")
         else:
             st.caption(
-                "ℹ️ Theory subject — Ground and the seminar hall are unavailable. "
-                f"{', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))} are only for single-hour "
-                f"{', '.join(sorted(LAB_OVERFLOW_SUBJECTS))}."
+                f"ℹ️ Theory subject. Single-hour CP, AI_T, and CE may use {', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))}."
             )
 
         if available:
@@ -1750,7 +1704,6 @@ with tabs[3]:
         else:
             st.error("🔴 No vacant rooms are available for this period.")
 
-        # Suggested room from automatic result
         auto_row = proposed[
             (proposed["Class"] == manual_class)
             & (proposed["Day"] == manual_day)
@@ -1940,26 +1893,6 @@ with tabs[5]:
             height=520,
         )
 
-        st.markdown("### Hurdle categories")
-        categories = []
-        for _, h in hurdles.iterrows():
-            problem = str(h["Problem"])
-            if "No room" in problem or "No library room" in problem:
-                cat = "Room shortage"
-            elif "capacity" in problem.lower():
-                cat = "Seminar hall capacity"
-            elif "conflict" in problem.lower() or "clash" in problem.lower():
-                cat = "Room conflict"
-            elif "lab" in problem.lower():
-                cat = "Laboratory constraint"
-            elif "movement" in problem.lower() or "block" in problem.lower():
-                cat = "Movement constraint"
-            else:
-                cat = "Other"
-            categories.append(cat)
-        hc = pd.Series(categories).value_counts().rename_axis("Category").reset_index(name="Count")
-        st.dataframe(hc, use_container_width=True, hide_index=True)
-
 # ----------------------------------------------------------
 # Room view
 # ----------------------------------------------------------
@@ -2071,12 +2004,6 @@ with tabs[8]:
     s2.metric("Approved assignments", len(st.session_state.approved_assignments))
     s3.metric("Remaining hurdles", len(hurdles))
 
-    st.info(
-        "This version intentionally keeps assignments in the Streamlit session. "
-        "Use the Excel export as the review/approval record. The existing Supabase "
-        "tables are not modified by this application."
-    )
-
     show_cols = [
         "Day", "Period", "Class", "Subject", "Faculty",
         "Old Room", "Proposed Room", "Allocation",
@@ -2109,8 +2036,7 @@ with tabs[8]:
 
 st.markdown("---")
 st.caption(
-    "Semi-Automatic Room Allocation • Supabase read-only analysis • "
-    "P1–P2 / P3–P4 / P5–P7 movement constraints preserved • "
-    "AIT→B37 • DTI→Seminar hall • Library P4/P7→B41/B42 • "
-    "PHY/LAC theory rooms only • B27/B37/C21 single-hour CE/AT_I/CP only"
+    "Semi-Automatic Room Allocation • "
+    "AIT→B37 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • Library P4/P7→B41/B42 • "
+    "PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
 )
