@@ -39,7 +39,7 @@ from supabase import Client, create_client
 #   - PHY and LAC allocate only theory rooms (never lab-type rooms).
 #   - B27, B37, C21 (lab-type) may be used for SINGLE-HOUR
 #     theory of CP, AI_T, and CE.
-#   - Library at P4 and P7 allocates to B41 and B42 and never theory rooms.
+#   - Library at P4 and P7 allocates based on strict priority rules (B41 -> B42 -> Library -> Vacant).
 
 
 st.set_page_config(
@@ -107,10 +107,33 @@ SEMINAR_SUBJECTS = {
     ],
 }
 
-# Library at P4 / P7 allocates to B41 / B42, never a theory room.
+# Library at P4 / P7 priority rule definitions
 LIBRARY_TOKEN = "LIB"          # subject starts with this (LIB, LIBRARY ...)
 LIBRARY_PERIODS = {4, 7}
-LIBRARY_ROOMS = ["B41", "B42"]
+
+
+def assign_room(available_rooms: List[str]) -> str:
+    """
+    Assigns a room based on strict priority:
+    1. B41
+    2. B42
+    3. Library
+    4. Any general Vacant Room (last option)
+    """
+    # Specific target rooms in order of priority
+    preferred_rooms = ["B41", "B42", "Library"]
+    
+    # Check for specific room priorities
+    for room in preferred_rooms:
+        if room in available_rooms:
+            return room
+
+    # Check for general vacant room options as the last resort
+    vacant_rooms = [r for r in available_rooms if r.lower().startswith("vacant") or r == "Vacant Room"]
+    if vacant_rooms:
+        return vacant_rooms[0]  # Return the first available vacant room
+    
+    return "No room available"
 
 
 # ----------------------------------------------------------
@@ -756,10 +779,7 @@ def generate_semi_auto(
     )
     theory_rows = ordered[~fixed_or_library].copy()
 
-    # ---- Library at P4 / P7 -> B41 / B42 only (never a theory room) ----
-    room_lookup = {norm(r): r for r in all_rooms}
-    lib_pool = [room_lookup[norm(r)] for r in LIBRARY_ROOMS if norm(r) in room_lookup]
-    last_library_room: Dict[Tuple[str, str], str] = {}
+    # ---- Library at P4 / P7 -> Strictly assign based on priority list ----
     is_lib = pd.Series(
         [
             is_library_slot(s, p) and not is_fixed_row(s, c, lab_map)
@@ -786,30 +806,23 @@ def generate_semi_auto(
             continue
 
         taken = {norm(y) for y in occupancy[slot_key(day, p)]}
-        free = [r for r in lib_pool if norm(r) not in taken]
-        if not free:
+        free = [r for r in all_rooms if norm(r) not in taken]
+        room = assign_room(free)
+        if room == "No room available":
             proposed.append({
                 **base, "Proposed Room": "UNALLOCATED", "Allocation": "PENDING",
                 "Status": "CONFLICT",
-                "Reason": f"{'/'.join(LIBRARY_ROOMS)} are all taken for library at P{p}.",
+                "Reason": f"No available rooms for library assignment at P{p}.",
             })
             hurdles.append({
                 "Priority": "HIGH", "Day": day, "Period": p, "Class": cls,
                 "Subject": x["Subject"],
-                "Problem": f"No library room ({', '.join(LIBRARY_ROOMS)}) free at P{p}.",
+                "Problem": f"No vacant room found for library assignment at P{p}.",
                 "Action": "Stagger library periods between classes.",
             })
             continue
 
-        prev = last_library_room.get((cls, day), "")
-        free.sort(key=lambda r: (
-            0 if norm(r) == norm(prev) else 1,
-            0 if norm(r) == norm(old_room) else 1,
-            lib_pool.index(r) if r in lib_pool else 99,
-        ))
-        room = free[0]
         occupancy[slot_key(day, p)].add(room)
-        last_library_room[(cls, day)] = room
         proposed.append({
             **base, "Proposed Room": room, "Allocation": "AUTO-SUGGESTED",
             "Status": "UNCHANGED" if norm(old_room) == norm(room) else "ROOM CHANGE",
@@ -1168,8 +1181,7 @@ def validate_manual_assignment(
     library = is_library_slot(subject, period)
 
     if library:
-        if norm(room) not in {norm(x) for x in LIBRARY_ROOMS}:
-            return False, f"Library periods (P4/P7) must allocate to {', '.join(LIBRARY_ROOMS)}."
+        pass
     else:
         if seminar_room and norm(room) == norm(seminar_room):
             return False, "Seminar hall is reserved for DTI (ECE/CSE 1-4)."
@@ -1387,7 +1399,7 @@ with st.sidebar:
     st.write("🚫 PHY and LAC allocate ONLY theory rooms, never lab rooms.")
     st.write("🧪 B27/B37/C21: allocate for single-hour CP, AI_T, and CE theory.")
     st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at once).")
-    st.write("📚 Library at P4/P7 → allocates to B41/B42 only.")
+    st.write("📚 Library at P4/P7 → allocates in priority order: B41 → B42 → Library → Vacant.")
     st.write("📌 Tuesday & Wednesday P1–P2, P3–P4: AIT(B37) → B37, remaining AIT → C21.")
 
 try:
@@ -1535,8 +1547,8 @@ with tabs[0]:
         "Named class groups are nudged toward their assigned room pool. "
         "Tuesday & Wednesday P1–P2 & P3–P4: AIT(B37) uses B37 and remaining AIT uses C21. "
         "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Library at P4/P7 "
-        "allocates B41/B42 only. PHY and LAC allocate theory rooms only. B27/B37/C21 can allocate "
-        "for single-hour CP, AI_T, and CE theory. Ground is for sports only."
+        "allocates based on priority (B41 → B42 → Library → Vacant). PHY and LAC allocate theory rooms only. "
+        "B27/B37/C21 can allocate for single-hour CP, AI_T, and CE theory. Ground is for sports only."
     )
 
 # ----------------------------------------------------------
@@ -1675,7 +1687,7 @@ with tabs[3]:
 
         preferred_for_class = preferred_rooms_for_class(manual_class)
         if library_now:
-            preferred_for_class = LIBRARY_ROOMS
+            preferred_for_class = ["B41", "B42", "Library"]
         if preferred_for_class:
             preferred_set = {norm(p) for p in preferred_for_class}
             available_ordered = [r2 for r2 in available if norm(r2) in preferred_set] + [
@@ -1703,7 +1715,7 @@ with tabs[3]:
         if fixed_now:
             st.caption("📌 Fixed subject (lab / AIT / seminar) — set automatically.")
         elif library_now:
-            st.caption(f"📚 Library period — allocates to {', '.join(LIBRARY_ROOMS)} only.")
+            st.caption("📚 Library period — allocates in priority: B41 → B42 → Library → Vacant Room.")
         elif subject_forbids_labs(r["Subject"]):
             st.caption(f"⚠️ {r['Subject']} allocates only theory rooms (never lab rooms like B27/B37/C21).")
         else:
@@ -2052,5 +2064,5 @@ st.markdown("---")
 st.caption(
     "Semi-Automatic Room Allocation • "
     "Tue & Wed P1-P4: AIT(B37)→B37 & remaining AIT→C21 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • "
-    "Library P4/P7→B41/B42 • PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
+    "Library P4/P7→B41/B42/Library/Vacant Room • PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
 )
