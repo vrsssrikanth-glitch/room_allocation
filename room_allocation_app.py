@@ -30,16 +30,17 @@ from supabase import Client, create_client
 #   CAI-1, CAI-2, CSM-1, CSM-2, CSM-3 -> A41, A42, A45, A46, A47
 #
 # Special rules:
-#   - Tuesday & Wednesday P1-P2, P3-P4:
+#   - Tuesday P1-P4:
 #       * AIT(B37) -> pinned to B37
 #       * Remaining AIT -> allocated to C21
 #   - Seminar hall takes up to 4 classes at once, for DTI of
 #     ECE-1..4 and CSE-1..4.
 #   - GROUND is reserved for sports subjects.
 #   - PHY and LAC allocate only theory rooms (never lab-type rooms).
-#   - B27, B37, C21 (lab-type) may be used for SINGLE-HOUR
-#     theory of CP, AI_T, and CE.
-#   - Library at P4 and P7 allocates to B41 and B42 and never theory rooms.
+#   - CE lab -> pinned to B37
+#   - Except PHY and LAC, all subjects can occupy labs B37, C21, B27
+#   - Library is given least priority (allocated only if no other room is free)
+#     or allocated to Library room if specified.
 
 
 st.set_page_config(
@@ -86,16 +87,14 @@ ROOM_GROUP_RULES: List[Tuple[List[str], List[str]]] = [
 # Ground is reserved for sports subjects only.
 GROUND_ROOM = "GROUND"
 
-# Theory rooms that are lab-type. ONLY single-hour theory of the subjects
-# in LAB_OVERFLOW_SUBJECTS may use them.
+# Lab rooms that can be used for overflow theory by all subjects EXCEPT PHY and LAC.
 LAB_OVERFLOW_ROOMS_FOR_THEORY = {"B27", "B37", "C21"}
-LAB_OVERFLOW_SUBJECTS = {"CE", "AI_T", "CP", "A_T"}
 
 # Never placed in any lab-type room, not even B27/B37/C21.
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 # Default pinned rooms for fixed subjects
-FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37"}
+FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37", "CE LAB": "B37"}
 
 # Seminar hall: shared by up to 4 classes at once for DTI of ECE1-4 and CSE1-4.
 SEMINAR_KEYWORD = "Seminar hall"
@@ -107,10 +106,9 @@ SEMINAR_SUBJECTS = {
     ],
 }
 
-# Library at P4 / P7 allocates to B41 / B42, never a theory room.
+# Library token
 LIBRARY_TOKEN = "LIB"          # subject starts with this (LIB, LIBRARY ...)
-LIBRARY_PERIODS = {4, 7}
-LIBRARY_ROOMS = ["B41", "B42"]
+LIBRARY_ROOMS = ["LIBRARY", "LIB", "B41", "B42"]
 
 
 # ----------------------------------------------------------
@@ -382,10 +380,6 @@ def subject_matches(subject: str, tokens) -> bool:
     return any(s == t or s.startswith(t + "-") or s.startswith(t + " ") or s.startswith(t + "_") for t in tokens)
 
 
-def subject_may_use_lab_overflow(subject: str) -> bool:
-    return subject_matches(subject, LAB_OVERFLOW_SUBJECTS)
-
-
 def is_seminar_row(subject: str, cls: str) -> bool:
     s, c = norm(subject), norm(cls)
     for code, classes in SEMINAR_SUBJECTS.items():
@@ -396,7 +390,7 @@ def is_seminar_row(subject: str, cls: str) -> bool:
 
 
 def is_library_slot(subject: str, period: int) -> bool:
-    return int(period) in LIBRARY_PERIODS and norm(subject).startswith(LIBRARY_TOKEN)
+    return norm(subject).startswith(LIBRARY_TOKEN)
 
 
 def find_seminar_room(all_rooms) -> str:
@@ -406,27 +400,42 @@ def find_seminar_room(all_rooms) -> str:
     return ""
 
 
+def find_library_room(all_rooms) -> str:
+    for r in all_rooms:
+        if "library" in norm(r).lower() or "lib" in norm(r).lower():
+            return clean(r)
+    return ""
+
+
 def build_lab_map(labs: pd.DataFrame) -> Dict[str, str]:
     m = {norm(r["Lab_Subject"]): clean(r["Room"]) for _, r in labs.iterrows()}
+    # Always ensure CE LAB is mapped to B37
+    m["CE LAB"] = "B37"
     for subj, room in FIXED_SUBJECT_ROOMS.items():
-        m[norm(subj)] = room
+        if norm(subj) not in m:
+            m[norm(subj)] = room
     return m
 
 
 def is_fixed_row(subject: str, cls: str, lab_map: Dict[str, str]) -> bool:
-    return is_lab(subject, lab_map) or is_seminar_row(subject, cls) or norm(subject) in FIXED_SUBJECT_ROOMS or norm(subject).startswith("AIT")
+    s = norm(subject)
+    return is_lab(s, lab_map) or is_seminar_row(subject, cls) or s in FIXED_SUBJECT_ROOMS or s.startswith("AIT") or "CE LAB" in s
 
 
 def fixed_room_for_row(subject: str, cls: str, day: str, period: int, lab_map: Dict[str, str], all_rooms: List[str]) -> str:
     if is_seminar_row(subject, cls):
         return find_seminar_room(all_rooms)
     
-    # Specific rule for Tuesday and Wednesday P1-P2, P3-P4 for AIT subjects
     s_norm = norm(subject)
     d_norm = norm(day)
     p_val = int(period)
     
-    if d_norm in ["TUESDAY", "WEDNESDAY"] and p_val in [1, 2, 3, 4]:
+    # Specific rule for CE LAB -> pinned to B37
+    if "CE LAB" in s_norm or s_norm == "CE LAB":
+        return "B37"
+
+    # Specific rule for Tuesday P1-P4 for AIT subjects
+    if d_norm == "TUESDAY" and p_val in [1, 2, 3, 4]:
         if "AIT(B37)" in s_norm or s_norm == "AIT(B37)":
             return "B37"
         elif "AIT" in s_norm:
@@ -565,7 +574,7 @@ def base_room_data(rooms: pd.DataFrame):
     if seminar_room:
         reserved.add(norm(seminar_room))
 
-    # B27/B37/C21 are kept OUT of general theory pool.
+    # General theory pool excluding lab overflow rooms and reserved rooms
     theory_rooms = [
         r for r in all_rooms
         if room_is_theory_type(room_type.get(norm(r), ""))
@@ -582,20 +591,33 @@ def base_room_data(rooms: pd.DataFrame):
         ]
 
     lab_overflow_rooms = [
-        r for r in other_rooms if norm(r) in LAB_OVERFLOW_ROOMS_FOR_THEORY
+        r for r in all_rooms if norm(r) in LAB_OVERFLOW_ROOMS_FOR_THEORY
     ]
+    
+    # Library room (given least priority for regular class theory)
+    lib_room = find_library_room(all_rooms)
+    lib_rooms = [lib_room] if lib_room else [r for r in all_rooms if norm(r) in {norm(x) for x in LIBRARY_ROOMS}]
+
     theory_keys = {norm(x) for x in theory_rooms}
+    
+    # Primary theory pool + lab overflow rooms (B27, B37, C21)
     candidate_base = theory_rooms + [
         r for r in lab_overflow_rooms if norm(r) not in theory_keys
     ]
-    return all_rooms, room_type, theory_rooms, candidate_base
+    
+    # Least priority pool includes library room as last fallback
+    full_fallback_base = candidate_base + [
+        r for r in lib_rooms if norm(r) not in {norm(x) for x in candidate_base}
+    ]
+
+    return all_rooms, room_type, theory_rooms, candidate_base, full_fallback_base, lib_rooms
 
 
 def build_fixed_occupancy(
     timetable: pd.DataFrame, rooms: pd.DataFrame, labs: pd.DataFrame
 ):
     lab_map = build_lab_map(labs)
-    all_rooms, room_type, theory_rooms, candidate_base = base_room_data(rooms)
+    all_rooms, room_type, theory_rooms, candidate_base, full_fallback_base, lib_rooms = base_room_data(rooms)
     all_keys = {norm(x) for x in all_rooms}
     occupancy = defaultdict(set)
     shared_count = defaultdict(int)      # seminar hall head-count per slot
@@ -670,7 +692,7 @@ def build_fixed_occupancy(
             }
         )
 
-    return occupancy, fixed_rows, hurdles, all_rooms, room_type, theory_rooms, candidate_base
+    return occupancy, fixed_rows, hurdles, all_rooms, room_type, theory_rooms, candidate_base, full_fallback_base, lib_rooms
 
 
 def manual_room_for(key):
@@ -700,6 +722,7 @@ def suggestion_score(
     proposed: List[Dict[str, Any]],
     theory_rooms: List[str],
     room_type: Dict[str, str],
+    lib_rooms: List[str],
 ) -> int:
     rkey = norm(room)
     score = 0
@@ -711,6 +734,15 @@ def suggestion_score(
         score += 15000
     if room in theory_rooms:
         score += 5000
+    
+    # Penalize lab overflow rooms slightly so standard theory rooms are used first
+    if rkey in {norm(x) for x in LAB_OVERFLOW_ROOMS_FOR_THEORY}:
+        score -= 1000
+
+    # Penalize library room heavily so it is given LEAST priority (only used if no other room left)
+    if any(rkey == norm(lr) for lr in lib_rooms):
+        score -= 50000
+
     usage_hint = sum(
         1
         for x in proposed
@@ -735,6 +767,8 @@ def generate_semi_auto(
         room_type,
         theory_rooms,
         candidate_base,
+        full_fallback_base,
+        lib_rooms,
     ) = build_fixed_occupancy(timetable, rooms, labs)
 
     lab_map = build_lab_map(labs)
@@ -756,9 +790,12 @@ def generate_semi_auto(
     )
     theory_rows = ordered[~fixed_or_library].copy()
 
-    # ---- Library at P4 / P7 -> B41 / B42 only (never a theory room) ----
+    # ---- Library subjects handling ----
     room_lookup = {norm(r): r for r in all_rooms}
-    lib_pool = [room_lookup[norm(r)] for r in LIBRARY_ROOMS if norm(r) in room_lookup]
+    lib_pool = [room_lookup[norm(r)] for r in lib_rooms if norm(r) in room_lookup]
+    if not lib_pool:
+        lib_pool = [room_lookup[norm(r)] for r in LIBRARY_ROOMS if norm(r) in room_lookup]
+
     last_library_room: Dict[Tuple[str, str], str] = {}
     is_lib = pd.Series(
         [
@@ -788,16 +825,20 @@ def generate_semi_auto(
         taken = {norm(y) for y in occupancy[slot_key(day, p)]}
         free = [r for r in lib_pool if norm(r) not in taken]
         if not free:
+            # Fallback to any vacant theory room if dedicated library room is unavailable
+            free = [r for r in candidate_base if norm(r) not in taken]
+
+        if not free:
             proposed.append({
                 **base, "Proposed Room": "UNALLOCATED", "Allocation": "PENDING",
                 "Status": "CONFLICT",
-                "Reason": f"{'/'.join(LIBRARY_ROOMS)} are all taken for library at P{p}.",
+                "Reason": "No rooms available for library slot.",
             })
             hurdles.append({
                 "Priority": "HIGH", "Day": day, "Period": p, "Class": cls,
                 "Subject": x["Subject"],
-                "Problem": f"No library room ({', '.join(LIBRARY_ROOMS)}) free at P{p}.",
-                "Action": "Stagger library periods between classes.",
+                "Problem": f"No room free for Library at P{p}.",
+                "Action": "Free up a room or reschedule.",
             })
             continue
 
@@ -805,7 +846,7 @@ def generate_semi_auto(
         free.sort(key=lambda r: (
             0 if norm(r) == norm(prev) else 1,
             0 if norm(r) == norm(old_room) else 1,
-            lib_pool.index(r) if r in lib_pool else 99,
+            0 if r in lib_pool else 1,
         ))
         room = free[0]
         occupancy[slot_key(day, p)].add(room)
@@ -843,7 +884,7 @@ def generate_semi_auto(
             room = manual_room_for(manual_key(day, p, cls))
             if room:
                 manual_rooms.append(room)
-        if manual_rooms and len({norm(x) for x in manual_rooms}) == 1:
+        if manual_rooms and len({norm(x)} for x in manual_rooms) == 1:
             last_room_for_class_day[(cls, day)] = manual_rooms[0]
             same_class_day_rooms[(cls, day)].add(manual_rooms[0])
 
@@ -967,15 +1008,16 @@ def generate_semi_auto(
             same_class_day_rooms[(cls, day)].add(manual_common)
             continue
 
-        # Automatic suggestions pool calculation
+        # Automatic suggestions pool calculation:
+        # 1. PHY and LAC strictly cannot occupy lab rooms (B27, B37, C21).
+        # 2. All other subjects CAN occupy labs B37, C21, B27.
+        # 3. Library room is given LEAST priority and used only if no other room is free.
         if any(subject_forbids_labs(x["Subject"]) for x in group):
-            block_pool = theory_rooms
-        elif len(periods) == 1 and all(
-            subject_may_use_lab_overflow(x["Subject"]) for x in group
-        ):
-            block_pool = candidate_base
+            primary_pool = theory_rooms
+            fallback_pool = theory_rooms + [r for r in lib_rooms if norm(r) not in {norm(x) for x in theory_rooms}]
         else:
-            block_pool = theory_rooms
+            primary_pool = candidate_base
+            fallback_pool = full_fallback_base
 
         def score_pool(pool: List[str]) -> List[Tuple[int, str]]:
             found = []
@@ -998,6 +1040,7 @@ def generate_semi_auto(
                     proposed,
                     theory_rooms,
                     room_type,
+                    lib_rooms,
                 )
                 s -= idx
                 found.append((s, room))
@@ -1006,10 +1049,13 @@ def generate_semi_auto(
         candidates: List[Tuple[int, str]] = []
         if preferred_rooms:
             preferred_set = {norm(p) for p in preferred_rooms}
-            group_pool = [r for r in block_pool if norm(r) in preferred_set]
+            group_pool = [r for r in primary_pool if norm(r) in preferred_set]
             candidates = score_pool(group_pool)
         if not candidates:
-            candidates = score_pool(block_pool)
+            candidates = score_pool(primary_pool)
+        if not candidates:
+            # Fallback to least priority rooms (e.g. Library) if no primary/overflow room is free
+            candidates = score_pool(fallback_pool)
 
         if not candidates:
             for x in group:
@@ -1103,7 +1149,7 @@ def vacant_rooms_for(
     labs: pd.DataFrame,
     exclude_class: str | None = None,
 ):
-    fixed_occ, _, fixed_hurdles, all_rooms, room_type, theory_rooms, _ = build_fixed_occupancy(
+    fixed_occ, _, fixed_hurdles, all_rooms, room_type, theory_rooms, _, _, _ = build_fixed_occupancy(
         timetable, rooms, labs
     )
 
@@ -1167,10 +1213,7 @@ def validate_manual_assignment(
     seminar_room = find_seminar_room(room_ids)
     library = is_library_slot(subject, period)
 
-    if library:
-        if norm(room) not in {norm(x) for x in LIBRARY_ROOMS}:
-            return False, f"Library periods (P4/P7) must allocate to {', '.join(LIBRARY_ROOMS)}."
-    else:
+    if not library:
         if seminar_room and norm(room) == norm(seminar_room):
             return False, "Seminar hall is reserved for DTI (ECE/CSE 1-4)."
         if norm(room) == GROUND_ROOM:
@@ -1181,26 +1224,13 @@ def validate_manual_assignment(
         room_is_lab_type(room_type_map.get(norm(room), ""))
         or norm(room) in LAB_OVERFLOW_ROOMS_FOR_THEORY
     )
+    
     if is_lab_room and not library:
         if subject_forbids_labs(subject):
-            return False, f"{subject} must allocate only theory rooms and never any lab room, including {room}."
-        if norm(room) not in LAB_OVERFLOW_ROOMS_FOR_THEORY:
-            return False, (
-                f"{room} is a lab-type room. Only "
-                f"{', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))} may be used, and only "
-                f"for single-hour {', '.join(sorted(LAB_OVERFLOW_SUBJECTS))}."
-            )
-        if not subject_may_use_lab_overflow(subject):
-            return False, (
-                f"Only single-hour {', '.join(sorted(LAB_OVERFLOW_SUBJECTS))} theory "
-                f"may use {room}."
-            )
+            return False, f"{subject} (PHY/LAC) must allocate only theory rooms and never any lab room, including {room}."
 
     periods = assignable_periods(timetable, labs, cls, day, period)
     block = "LIBRARY" if library else shift_block(period)
-
-    if is_lab_room and not library and len(periods) > 1:
-        return False, f"{room} is only for single-hour theory; this block has {len(periods)} periods."
 
     for p in periods:
         available_p, _, _, _ = vacant_rooms_for(
@@ -1385,10 +1415,11 @@ with st.sidebar:
     st.markdown("### Special room rules")
     st.write("🏟️ Ground is reserved for sports subjects — never offered to theory.")
     st.write("🚫 PHY and LAC allocate ONLY theory rooms, never lab rooms.")
-    st.write("🧪 B27/B37/C21: allocate for single-hour CP, AI_T, and CE theory.")
+    st.write("🧪 CE lab pinned to B37.")
+    st.write("🧪 Labs B37, C21, B27 can be occupied by all subjects EXCEPT PHY and LAC.")
     st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at once).")
-    st.write("📚 Library at P4/P7 → allocates to B41/B42 only.")
-    st.write("📌 Tuesday & Wednesday P1–P2, P3–P4: AIT(B37) → B37, remaining AIT → C21.")
+    st.write("📚 Library: Given least priority; allocated only if no other room is free.")
+    st.write("📌 Tuesday P1–P4: AIT(B37) → B37, remaining AIT → C21.")
 
 try:
     with st.spinner("Reading timetable, rooms and lab information from Supabase..."):
@@ -1533,10 +1564,10 @@ with tabs[0]:
     st.info(
         "A class gets one room across P1–P2, one across P3–P4 and one across P5–P7. "
         "Named class groups are nudged toward their assigned room pool. "
-        "Tuesday & Wednesday P1–P2 & P3–P4: AIT(B37) uses B37 and remaining AIT uses C21. "
-        "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Library at P4/P7 "
-        "allocates B41/B42 only. PHY and LAC allocate theory rooms only. B27/B37/C21 can allocate "
-        "for single-hour CP, AI_T, and CE theory. Ground is for sports only."
+        "Tuesday P1–P4: AIT(B37) uses B37 and remaining AIT uses C21. "
+        "CE Lab uses B37. Except PHY and LAC, all subjects can occupy labs B37, C21, and B27. "
+        "Library is given least priority and used only if no other room is free. "
+        "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Ground is for sports only."
     )
 
 # ----------------------------------------------------------
@@ -1674,8 +1705,6 @@ with tabs[3]:
         )
 
         preferred_for_class = preferred_rooms_for_class(manual_class)
-        if library_now:
-            preferred_for_class = LIBRARY_ROOMS
         if preferred_for_class:
             preferred_set = {norm(p) for p in preferred_for_class}
             available_ordered = [r2 for r2 in available if norm(r2) in preferred_set] + [
@@ -1701,14 +1730,14 @@ with tabs[3]:
             )
 
         if fixed_now:
-            st.caption("📌 Fixed subject (lab / AIT / seminar) — set automatically.")
+            st.caption("📌 Fixed subject (lab / AIT / CE lab / seminar) — set automatically.")
         elif library_now:
-            st.caption(f"📚 Library period — allocates to {', '.join(LIBRARY_ROOMS)} only.")
+            st.caption("📚 Library period — given least priority, allocated if no room left.")
         elif subject_forbids_labs(r["Subject"]):
-            st.caption(f"⚠️ {r['Subject']} allocates only theory rooms (never lab rooms like B27/B37/C21).")
+            st.caption(f"⚠️ {r['Subject']} (PHY/LAC) allocates only theory rooms (never lab rooms like B27/B37/C21).")
         else:
             st.caption(
-                f"ℹ️ Theory subject. Single-hour CP, AI_T, and CE may use {', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))}."
+                f"ℹ️ Standard subject — can occupy labs {', '.join(sorted(LAB_OVERFLOW_ROOMS_FOR_THEORY))} if needed."
             )
 
         if available:
@@ -2051,6 +2080,6 @@ with tabs[8]:
 st.markdown("---")
 st.caption(
     "Semi-Automatic Room Allocation • "
-    "Tue & Wed P1-P4: AIT(B37)→B37 & remaining AIT→C21 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • "
-    "Library P4/P7→B41/B42 • PHY/LAC theory rooms only • B27/B37/C21 single-hour CP/AI_T/CE only"
+    "Tue P1-P4: AIT(B37)→B37 & remaining AIT→C21 • CE Lab→B37 • DTI (ECE 1-4 & CSE 1-4)→Seminar Hall (max 4) • "
+    "PHY/LAC theory rooms only • All other subjects can occupy labs B37, C21, B27 • Library given least priority"
 )
