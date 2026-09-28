@@ -19,10 +19,10 @@ from supabase import Client, create_client
 # No Supabase timetable/room writes are performed by this app.
 #
 # Movement constraints:
-#   P1-P2 = one room
-#   P3-P4 = one room
-#   P5-P7 = one room
-# Theory-room changes are permitted only at P1, P3 and P5.
+#   P1       = one room (Room shift allowed after P1)
+#   P2-P3    = one room (Room shift allowed after P3)
+#   P4-P7    = one room
+# Theory-room changes are permitted after P1 and after P3.
 # Laboratory subjects use the fixed room from the labs table.
 #
 # Room-group policy (nudges which free room is used first):
@@ -51,14 +51,16 @@ st.set_page_config(
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 PERIODS = [1, 2, 3, 4, 5, 6, 7]
+
+# Room shifts allowed after Period 1 and after Period 3
 SHIFT_BLOCKS = {
-    1: "P1-P2",
-    2: "P1-P2",
-    3: "P3-P4",
-    4: "P3-P4",
-    5: "P5-P7",
-    6: "P5-P7",
-    7: "P5-P7",
+    1: "P1",
+    2: "P2-P3",
+    3: "P2-P3",
+    4: "P4-P7",
+    5: "P4-P7",
+    6: "P4-P7",
+    7: "P4-P7",
 }
 
 TABLE_TIMETABLE = "timetable"
@@ -95,7 +97,7 @@ LAB_OVERFLOW_SUBJECTS = {"CE", "AI_T", "CP", "A_T"}
 NO_LAB_SUBJECTS = {"PHY", "LAC"}
 
 # Default pinned rooms for fixed subjects
-FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37"}
+FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37", "AIT": "B37"}
 
 # Seminar hall: shared by up to 4 classes at once for DTI of ECE1-4 and CSE1-4.
 SEMINAR_KEYWORD = "Seminar hall"
@@ -120,18 +122,15 @@ def assign_room(available_rooms: List[str]) -> str:
     3. Library
     4. Any general Vacant Room (last option)
     """
-    # Specific target rooms in order of priority
     preferred_rooms = ["B41", "B42", "Library"]
     
-    # Check for specific room priorities
     for room in preferred_rooms:
         if room in available_rooms:
             return room
 
-    # Check for general vacant room options as the last resort
     vacant_rooms = [r for r in available_rooms if r.lower().startswith("vacant") or r == "Vacant Room"]
     if vacant_rooms:
-        return vacant_rooms[0]  # Return the first available vacant room
+        return vacant_rooms[0]
     
     return "No room available"
 
@@ -518,9 +517,9 @@ def shift_block(period: int) -> str:
 
 def block_periods(block: str) -> List[int]:
     return {
-        "P1-P2": [1, 2],
-        "P3-P4": [3, 4],
-        "P5-P7": [5, 6, 7],
+        "P1": [1],
+        "P2-P3": [2, 3],
+        "P4-P7": [4, 5, 6, 7],
     }.get(block, [])
 
 
@@ -582,13 +581,11 @@ def base_room_data(rooms: pd.DataFrame):
     all_rooms = [clean(r["Room_ID"]) for r in room_records if clean(r["Room_ID"])]
     room_type = {norm(r["Room_ID"]): clean(r["Type"]) for r in room_records}
 
-    # Reserved rooms
     reserved = {GROUND_ROOM}
     seminar_room = find_seminar_room(all_rooms)
     if seminar_room:
         reserved.add(norm(seminar_room))
 
-    # B27/B37/C21 are kept OUT of general theory pool.
     theory_rooms = [
         r for r in all_rooms
         if room_is_theory_type(room_type.get(norm(r), ""))
@@ -621,7 +618,7 @@ def build_fixed_occupancy(
     all_rooms, room_type, theory_rooms, candidate_base = base_room_data(rooms)
     all_keys = {norm(x) for x in all_rooms}
     occupancy = defaultdict(set)
-    shared_count = defaultdict(int)      # seminar hall head-count per slot
+    shared_count = defaultdict(int)
     fixed_rows = []
     hurdles = []
 
@@ -841,7 +838,7 @@ def generate_semi_auto(
         key=lambda kv: (
             -len(kv[1]),
             DAYS.index(kv[0][0]),
-            {"P1-P2": 1, "P3-P4": 2, "P5-P7": 3}.get(kv[0][2], 9),
+            {"P1": 1, "P2-P3": 2, "P4-P7": 3}.get(kv[0][2], 9),
             kv[0][1],
         ),
     )
@@ -980,7 +977,6 @@ def generate_semi_auto(
             same_class_day_rooms[(cls, day)].add(manual_common)
             continue
 
-        # Automatic suggestions pool calculation
         if any(subject_forbids_labs(x["Subject"]) for x in group):
             block_pool = theory_rooms
         elif len(periods) == 1 and all(
@@ -1377,10 +1373,10 @@ with st.sidebar:
 
     st.markdown("### Movement constraints")
     st.info(
-        "P1–P2: one room\n\n"
-        "P3–P4: one room\n\n"
-        "P5–P7: one room\n\n"
-        "Room changes are permitted only at P1, P3 and P5."
+        "P1: one room\n\n"
+        "P2–P3: one room\n\n"
+        "P4–P7: one room\n\n"
+        "Room changes are permitted after P1 and after P3."
     )
 
     st.markdown("### Allocation logic")
@@ -1543,7 +1539,7 @@ with tabs[0]:
 
     st.markdown("### 🧭 Rule reminder")
     st.info(
-        "A class gets one room across P1–P2, one across P3–P4 and one across P5–P7. "
+        "Room shifts can occur after Period 1 and after Period 3. "
         "Named class groups are nudged toward their assigned room pool. "
         "Tuesday & Wednesday P1–P2 & P3–P4: AIT(B37) uses B37 and remaining AIT uses C21. "
         "DTI for ECE/CSE 1–4 uses the Seminar hall (up to 4 classes at a time). Library at P4/P7 "
