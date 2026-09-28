@@ -1386,7 +1386,7 @@ with st.sidebar:
     st.write("🏟️ Ground is reserved for sports subjects — never offered to theory.")
     st.write("🚫 PHY and LAC allocate ONLY theory rooms, never lab rooms.")
     st.write("🧪 B27/B37/C21: allocate for single-hour CP, AI_T, and CE theory.")
-    st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at a time).")
+    st.write("🏛️ Seminar hall: DTI for ECE1–4 & CSE1–4 (up to 4 classes at once).")
     st.write("📚 Library at P4/P7 → allocates to B41/B42 only.")
     st.write("📌 Tuesday & Wednesday P1–P2, P3–P4: AIT(B37) → B37, remaining AIT → C21.")
 
