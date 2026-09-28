@@ -97,7 +97,7 @@ FIXED_SUBJECT_ROOMS = {"AIT(B37)": "B37"}
 
 # Seminar hall: shared by several classes at once. The room is found in the
 # rooms table by name (any Room_ID containing "SEMINAR").
-SEMINAR_KEYWORD = "Seminar Hall"
+SEMINAR_KEYWORD = "Seminar hall"
 SEMINAR_CAPACITY = 4
 SEMINAR_SUBJECTS = {
     "DTI": ["ECE-1", "ECE-2", "ECE-3", "ECE-4", "CSE-1", "CSE-2", "CSE-3", "CSE-4"],
